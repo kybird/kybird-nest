@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.next/
+out/
+build/
+
+# 로컬 DB — 서버/클라이언트 모두 생성물
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+.env
+.env.local
+.env*.local
+
+# Prisma 생성물
+**/generated/prisma/
+
+*.tsbuildinfo
+.DS_Store

@@ -1,0 +1,22 @@
+{
+  "name": "kybird-nest",
+  "version": "0.0.0",
+  "private": true,
+  "description": "코딩 에이전트를 위한 지식·스킬 백엔드",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:server": "npm run dev -w @kybird/server"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

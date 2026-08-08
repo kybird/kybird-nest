@@ -1,0 +1,113 @@
+// kybird-nest 서버 스키마
+//
+// 서버는 진실이지만 똑똑하지 않다. 저장하고, 단조증가 seq 를 찍고,
+// 커서 이후 변경분을 돌려주는 게 전부다.
+//
+// 설계 근거는 doc/brief.md 3장·4장 참고.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id           String   @id
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  tokens  Token[]
+  repos   Repo[]
+  columns Column[]
+  cards   Card[]
+}
+
+/// 로그인하면 발급되는 API 토큰. 클라이언트는 `~/.kybird/config.json` 에 보관한다.
+/// 원문이 아니라 해시를 저장한다 — DB가 새도 토큰이 그대로 새지는 않게.
+model Token {
+  id         String   @id
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  label      String?
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime?
+
+  @@index([userId])
+}
+
+/// 전역 단조증가 카운터. seq 발급에만 쓴다.
+///
+/// 유저별로 나누지 않는 이유: pull 할 때 어차피 userId 로 거르므로
+/// 한 유저가 보는 수열은 여전히 단조증가고, 서버는 카운터 하나만 관리하면 된다.
+model Counter {
+  id    String @id
+  value Int    @default(0)
+}
+
+/// 레포(프로젝트). git 프로젝트가 아닐 수도 있으므로 gitRemote 는 선택이다.
+model Repo {
+  id     String @id
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name      String
+  path      String?
+  gitRemote String?
+
+  updatedAt DateTime
+  deletedAt DateTime?
+  seq       Int
+
+  columns Column[]
+  cards   Card[]
+
+  @@index([userId, seq])
+}
+
+model Column {
+  id     String @id
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repoId String
+  repo   Repo   @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  title String
+  /// 분수 랭크. 정수 순서는 오프라인에서 반드시 충돌한다 — brief.md 4장 참고.
+  rank  String
+
+  updatedAt DateTime
+  deletedAt DateTime?
+  seq       Int
+
+  cards Card[]
+
+  @@index([userId, seq])
+  @@index([repoId])
+}
+
+model Card {
+  id       String @id
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repoId   String
+  repo     Repo   @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  columnId String
+  column   Column @relation(fields: [columnId], references: [id], onDelete: Cascade)
+
+  title String
+  body  String @default("")
+  rank  String
+
+  updatedAt DateTime
+  deletedAt DateTime?
+  seq       Int
+
+  @@index([userId, seq])
+  @@index([repoId])
+  @@index([columnId])
+}
