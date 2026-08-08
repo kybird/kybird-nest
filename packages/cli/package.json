@@ -1,0 +1,25 @@
+{
+  "name": "knest",
+  "version": "0.0.0",
+  "private": true,
+  "description": "kybird-nest 명령줄 도구",
+  "type": "module",
+  "bin": {
+    "knest": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@kybird/core": "^0.0.0",
+    "@kybird/shared": "^0.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.9.3"
+  }
+}
