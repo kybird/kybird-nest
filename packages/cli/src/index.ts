@@ -12,6 +12,8 @@ import {
   editCard,
   findLink,
   formatReport,
+  inviteRepo,
+  joinRepo,
   loadConfig,
   login,
   moveCard,
@@ -42,6 +44,8 @@ const HELP = `knest — kybird-nest 명령줄 도구
   knest link [--name 이름]        현재 디렉토리를 레포에 연결한다
   knest sync                      서버와 맞춘다
   knest status                    아직 못 올린 변경과 충돌을 보여준다
+  knest repo invite               참여 코드를 발급한다 (합류시킬 사람에게 전달)
+  knest repo join <repoId> <코드> 참여 코드로 레포에 합류한다
 
 에이전트
   knest mcp                       MCP 서버로 붙는다 (에이전트가 실행)
@@ -88,6 +92,8 @@ async function main(argv: string[]): Promise<number> {
       return whoami();
     case "link":
       return link(rest);
+    case "repo":
+      return repoTopLevel(rest);
     case "sync":
       return runSync();
     case "status":
@@ -191,8 +197,24 @@ async function link(argv: string[]): Promise<number> {
   const cwd = process.cwd();
   const existing = findLink(cwd);
   if (existing) {
-    process.stdout.write(`이미 연결돼 있다: ${existing.link.repoId}\n  ${existing.path}\n`);
-    return 0;
+    const store = openStore();
+    try {
+      if (store.getRepo(existing.link.repoId)) {
+        process.stdout.write(`이미 연결돼 있다: ${existing.link.repoId}\n  ${existing.path}\n`);
+        return 0;
+      }
+      // .kybird/repo.json 은 있는데 로컬 스토어엔 그 레포가 없다 — 다른
+      // 머신에서 만든 내 레포이거나, 다른 사람이 만들어서 아직 합류 전인
+      // 레포다. 클라이언트만으로는 어느 쪽인지 구분할 수 없으니 둘 다 안내한다.
+      process.stdout.write(
+        `"${existing.link.repoId}" 레포에 연결은 돼 있지만 로컬엔 아직 없다.\n` +
+          `이 레포에 처음 합류하는 거라면: knest repo join ${existing.link.repoId} <초대 코드>\n` +
+          "다른 머신에서 만든 내 레포라면: knest sync\n",
+      );
+      return 1;
+    } finally {
+      store.close();
+    }
   }
 
   const store = openStore();
@@ -205,6 +227,86 @@ async function link(argv: string[]): Promise<number> {
     // 바로 올려둔다. 실패해도 로컬에는 남으므로 다음 sync 에 따라간다.
     await trySync(store);
     return 0;
+  } finally {
+    store.close();
+  }
+}
+
+const REPO_HELP = `knest repo — 레포 참여 관리
+
+  knest repo invite               현재 레포의 참여 코드를 발급한다
+  knest repo join <repoId> <코드> 참여 코드로 레포에 합류한다
+
+clone 만으로는 자동 합류가 안 된다 — .kybird/repo.json 의 repoId 는 git 에
+커밋되므로, 공개 레포라면 그 값 자체는 이미 공개돼 있다. 참여 코드는
+합류시킬 사람에게 채팅 등으로 직접 전달해라.
+`;
+
+async function repoTopLevel(argv: string[]): Promise<number> {
+  const [sub, ...rest] = argv;
+  if (sub === undefined || sub === "help") {
+    process.stdout.write(REPO_HELP);
+    return 0;
+  }
+  switch (sub) {
+    case "invite":
+      return repoInvite();
+    case "join":
+      return repoJoin(rest);
+    default:
+      process.stderr.write(`알 수 없는 하위 명령: ${sub}\n\n${REPO_HELP}`);
+      return 1;
+  }
+}
+
+/** 현재 연결된 레포의 참여 코드를 발급한다. 역할 구분이 없어 멤버라면 누구나 할 수 있다. */
+async function repoInvite(): Promise<number> {
+  return withRepo(async (_store, repoId) => {
+    const config = loadConfig();
+    try {
+      const result = await inviteRepo(config.serverUrl, requireToken(config), repoId);
+      process.stdout.write(
+        `참여 코드: ${result.code}\n` +
+          "이 코드는 지금 한 번만 보여준다 — 합류시킬 사람에게 직접 전달해라.\n" +
+          `합류: knest repo join ${repoId} ${result.code}\n`,
+      );
+      return 0;
+    } catch (error) {
+      process.stderr.write(`초대 코드 발급 실패: ${(error as Error).message}\n`);
+      return 1;
+    }
+  });
+}
+
+/**
+ * 참여 코드로 레포에 합류한다. `withRepo` 를 안 쓰는 이유는 정의상 이
+ * 레포가 아직 로컬 스토어에 없는 상태이기 때문이다 — 그게 join 이 하는 일이다.
+ */
+async function repoJoin(argv: string[]): Promise<number> {
+  const [repoId, code] = argv;
+  if (!repoId || !code) {
+    process.stderr.write("사용법: knest repo join <repoId> <초대 코드>\n");
+    return 1;
+  }
+
+  const config = loadConfig();
+  const store = openStore();
+  try {
+    const result = await joinRepo(config.serverUrl, requireToken(config), repoId, code);
+    store.applyRemote("repos", result.repo);
+
+    // .kybird/repo.json 이 이미 있으면(git clone 으로 받은 것) 그대로 둔다.
+    // 없으면(레포를 만들지 않고 join 부터 한 경우) 새로 만든다.
+    if (!findLink(process.cwd())) {
+      writeLink(process.cwd(), { repoId: result.repo.id });
+    }
+
+    process.stdout.write(`"${result.repo.name}" 레포에 합류했다. knest sync 로 나머지를 받아라.\n`);
+    await trySync(store);
+    return 0;
+  } catch (error) {
+    process.stderr.write(`합류 실패: ${(error as Error).message}\n`);
+    return 1;
   } finally {
     store.close();
   }
@@ -475,7 +577,8 @@ async function withRepo(
     if (!store.getRepo(linked.link.repoId)) {
       process.stderr.write(
         `연결된 레포가 로컬에 없다: ${linked.link.repoId}\n` +
-          "다른 머신에서 만든 레포라면 knest sync 를 먼저 하면 된다.\n",
+          "다른 머신에서 만든 내 레포라면 knest sync 를 먼저 하면 된다.\n" +
+          `아직 합류 전인 레포라면 knest repo join ${linked.link.repoId} <초대 코드>\n`,
       );
       return 1;
     }

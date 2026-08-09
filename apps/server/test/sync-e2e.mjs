@@ -202,4 +202,46 @@ ok(r4.rejected[0]?.reason === "forbidden", `남의 레코드 쓰기 거절 (${r4
 await A.sync();
 ok(A.store.repos.get(repoId).name === "kybird-nest", "탈취 시도 후에도 원본 유지");
 
+// --- 레포 초대·합류 ---
+
+// 멤버가 아니면 초대 코드를 발급할 수 없다.
+const inviteAsNonMember = await api("/api/repo/invite", { repoId }, other.json.token);
+ok(inviteAsNonMember.status === 403, `비멤버는 초대 발급 못함 (${inviteAsNonMember.status})`);
+
+const invite = await api("/api/repo/invite", { repoId }, token);
+ok(invite.status === 201, `초대 코드 발급 201 (${invite.status})`);
+const code = invite.json.code;
+ok(typeof code === "string" && code.length > 10, "초대 코드가 문자열로 옴");
+
+// 틀린 코드로는 합류가 안 된다.
+const badJoin = await api("/api/repo/join", { repoId, code: "wrong-code" }, other.json.token);
+ok(badJoin.status === 403, `틀린 코드 합류 거절 (${badJoin.status})`);
+
+// D 가 올바른 코드로 합류한다.
+const dReg = await api("/api/auth/register", {
+  email: `d-${Date.now()}@example.com`,
+  password: "hunter2hunter2",
+});
+const join = await api("/api/repo/join", { repoId, code }, dReg.json.token);
+ok(join.status === 200, `올바른 코드로 합류 200 (${join.status})`);
+ok(join.json.repo?.id === repoId, "합류 응답에 레포 정보 포함");
+
+// 합류한 D 는 이제 pull 에서 A 가 만든 카드가 보여야 한다.
+const D = makeClient(dReg.json.token, "D");
+await D.sync();
+ok(D.store.repos.size === 1, `D 가 합류 후 레포를 pull 로 받음 (${D.store.repos.size})`);
+ok(D.store.cards.size === 2, `D 가 카드 2개(삭제분 포함) 수신 (${D.store.cards.size})`);
+
+// D 가 공유 카드를 고치면 A 도 봐야 한다 — 멤버 간 동일 권한 확인.
+const sharedEdit = { ...D.store.cards.get(card1), title: "D 가 고침", updatedAt: tick() };
+D.pending.cards.push(sharedEdit);
+const rD = await D.sync();
+ok(rD.rejected.length === 0, `D 의 공유 카드 수정 거절 없음 (${JSON.stringify(rD.rejected)})`);
+await A.sync();
+ok(A.store.cards.get(card1).title === "D 가 고침", "A 가 D 의 수정을 수신 (멤버 간 공유 확인)");
+
+// D 가 합류한 뒤에도 여전히 멤버가 아닌 C 는 못 본다.
+await C.sync();
+ok(C.store.repos.size === 0, "C 는 여전히 이 레포를 못 본다");
+
 console.log(process.exitCode ? "\n실패 있음" : "\n전부 통과");

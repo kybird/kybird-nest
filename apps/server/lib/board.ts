@@ -28,15 +28,23 @@ const toMs = (d: Date): number => d.getTime();
 const toMsOrNull = (d: Date | null): number | null => (d === null ? null : d.getTime());
 
 export async function loadBoard(userId: string, repoId: string): Promise<Board | null> {
+  const membership = await prisma.repoMember.findUnique({
+    where: { repoId_userId: { repoId, userId } },
+    select: { id: true },
+  });
+  if (!membership) return null;
+
   const repo = await prisma.repo.findFirst({
-    where: { id: repoId, userId, deletedAt: null },
+    where: { id: repoId, deletedAt: null },
     select: { id: true, name: true, gitRemote: true },
   });
   if (!repo) return null;
 
+  // 컬럼·카드는 레포 멤버 전원이 공유한다 — userId 로 또 거르면 다른
+  // 멤버가 만든 게 안 보인다.
   const [columns, cards] = await Promise.all([
-    prisma.column.findMany({ where: { repoId, userId, deletedAt: null } }),
-    prisma.card.findMany({ where: { repoId, userId, deletedAt: null } }),
+    prisma.column.findMany({ where: { repoId, deletedAt: null } }),
+    prisma.card.findMany({ where: { repoId, deletedAt: null } }),
   ]);
 
   const asColumn = (c: (typeof columns)[number]): Column => ({
@@ -78,7 +86,7 @@ export async function addCard(
   title: string,
 ): Promise<void> {
   const siblings = await prisma.card.findMany({
-    where: { columnId, userId, deletedAt: null },
+    where: { columnId, deletedAt: null },
     select: { rank: true },
   });
   const last = siblings.map((s) => s.rank).sort().at(-1) ?? null;
@@ -106,18 +114,18 @@ export async function moveCard(
   toColumnId: string,
   position: number,
 ): Promise<void> {
-  const card = await prisma.card.findFirst({ where: { id: cardId, userId, deletedAt: null } });
+  const card = await prisma.card.findFirst({ where: { id: cardId, deletedAt: null } });
   if (!card) throw new Error("카드를 찾을 수 없다");
 
   const column = await prisma.column.findFirst({
-    where: { id: toColumnId, userId, deletedAt: null },
+    where: { id: toColumnId, deletedAt: null },
     select: { id: true, repoId: true },
   });
   if (!column) throw new Error("컬럼을 찾을 수 없다");
 
   const siblings = (
     await prisma.card.findMany({
-      where: { columnId: toColumnId, userId, deletedAt: null, NOT: { id: cardId } },
+      where: { columnId: toColumnId, deletedAt: null, NOT: { id: cardId } },
       select: { id: true, rank: true },
     })
   ).sort(byRank);
@@ -140,7 +148,7 @@ export async function moveCard(
 }
 
 export async function editCardTitle(userId: string, cardId: string, title: string): Promise<void> {
-  const card = await prisma.card.findFirst({ where: { id: cardId, userId, deletedAt: null } });
+  const card = await prisma.card.findFirst({ where: { id: cardId, deletedAt: null } });
   if (!card) throw new Error("카드를 찾을 수 없다");
   await applyChanges(userId, {
     ...emptyChangeSet(),
@@ -161,7 +169,7 @@ export async function editCardTitle(userId: string, cardId: string, title: strin
 
 /** 삭제는 툼스톤이다. 진짜로 지우면 다른 머신이 삭제를 알 방법이 없다. */
 export async function deleteCard(userId: string, cardId: string): Promise<void> {
-  const card = await prisma.card.findFirst({ where: { id: cardId, userId, deletedAt: null } });
+  const card = await prisma.card.findFirst({ where: { id: cardId, deletedAt: null } });
   if (!card) return;
   const timestamp = now();
   await applyChanges(userId, {
@@ -190,10 +198,11 @@ export type RepoSummary = {
   lastActivity: number | null;
 };
 
-/** 대시보드용 요약 — 한눈에 보기의 알맹이. */
+/** 대시보드용 요약 — 한눈에 보기의 알맹이. 내가 만든 레포가 아니라 내가 멤버인 레포 전부. */
 export async function summarize(userId: string): Promise<RepoSummary[]> {
+  const memberships = await prisma.repoMember.findMany({ where: { userId }, select: { repoId: true } });
   const repos = await prisma.repo.findMany({
-    where: { userId, deletedAt: null },
+    where: { id: { in: memberships.map((m) => m.repoId) }, deletedAt: null },
     select: { id: true, name: true, gitRemote: true },
     orderBy: { name: "asc" },
   });

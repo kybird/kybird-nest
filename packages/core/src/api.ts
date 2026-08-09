@@ -1,8 +1,12 @@
 import {
   authResultSchema,
   bearer,
+  repoInviteResultSchema,
+  repoJoinResultSchema,
   syncResponseSchema,
   type AuthResult,
+  type RepoInviteResult,
+  type RepoJoinResult,
   type SyncRequest,
   type SyncResponse,
 } from "@kybird/shared";
@@ -82,4 +86,27 @@ export async function syncOnce(
   request: SyncRequest,
 ): Promise<SyncResponse> {
   return syncResponseSchema.parse(await post(baseUrl, "/api/sync", request, token));
+}
+
+/** 레포 참여 코드를 발급한다. 평문은 이 호출의 응답에서만 볼 수 있다. */
+export async function inviteRepo(
+  baseUrl: string,
+  token: string,
+  repoId: string,
+): Promise<RepoInviteResult> {
+  return repoInviteResultSchema.parse(
+    await post(baseUrl, "/api/repo/invite", { repoId }, token),
+  );
+}
+
+/** 참여 코드로 레포에 합류한다. */
+export async function joinRepo(
+  baseUrl: string,
+  token: string,
+  repoId: string,
+  code: string,
+): Promise<RepoJoinResult> {
+  return repoJoinResultSchema.parse(
+    await post(baseUrl, "/api/repo/join", { repoId, code }, token),
+  );
 }

@@ -20,13 +20,14 @@ model User {
   passwordHash String
   createdAt    DateTime @default(now())
 
-  tokens      Token[]
-  repos       Repo[]
-  columns     Column[]
-  cards       Card[]
-  wikiEntries WikiEntry[]
-  embeddings  Embedding[]
-  searchLogs  SearchLog[]
+  tokens         Token[]
+  repos          Repo[]
+  columns        Column[]
+  cards          Card[]
+  wikiEntries    WikiEntry[]
+  embeddings     Embedding[]
+  searchLogs     SearchLog[]
+  repoMembership RepoMember[]
 }
 
 /// 로그인하면 발급되는 API 토큰. 클라이언트는 `~/.kybird/config.json` 에 보관한다.
@@ -53,6 +54,10 @@ model Counter {
 }
 
 /// 레포(프로젝트). git 프로젝트가 아닐 수도 있으므로 gitRemote 는 선택이다.
+///
+/// userId 는 "만든 사람"일 뿐이다 — 접근 권한은 RepoMember 로 판단한다.
+/// (userId 단일소유였던 시절의 흔적. 여러 사람이 초대 코드로 합류해서
+/// 같은 지식을 공유하는 쪽으로 바뀌면서 접근권 판단 주체가 옮겨갔다.)
 model Repo {
   id     String @id
   userId String
@@ -70,8 +75,37 @@ model Repo {
   cards       Card[]
   wikiEntries WikiEntry[]
   searchLogs  SearchLog[]
+  members     RepoMember[]
+  invites     RepoInvite[]
 
   @@index([userId, seq])
+}
+
+/// 레포 접근권의 단일 진실 공급원. 역할 구분 없음 — 멤버는 전부 동일 권한.
+model RepoMember {
+  id        String   @id
+  repoId    String
+  repo      Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([repoId, userId])
+  @@index([userId])
+  @@index([repoId])
+}
+
+/// 레포별 참여 코드. Token 과 같은 패턴 — 원문은 저장 안 하고 해시만 둔다.
+model RepoInvite {
+  id        String    @id
+  repoId    String
+  repo      Repo      @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  codeHash  String
+  createdBy String
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  @@index([repoId])
 }
 
 model Column {

@@ -56,12 +56,15 @@ function clientKey(request: Request): string {
   return parts.at(-1) ?? "direct";
 }
 
-export type LimitName = "login" | "register";
+export type LimitName = "login" | "register" | "repoJoin";
 
 const LIMITS: Record<LimitName, { limit: number; windowMs: number }> = {
   // 사람이 로그인하는 빈도는 낮다. 넉넉해 보여도 무차별 대입에는 한참 모자란다.
   login: { limit: 10, windowMs: 15 * 60_000 },
   register: { limit: 5, windowMs: 60 * 60_000 },
+  // 초대 코드는 128비트라 추측 자체가 비현실적이지만, 그래도 무차별
+  // 대입 시도를 감지할 수 있게 로그인과 같은 수준으로 걸어둔다.
+  repoJoin: { limit: 10, windowMs: 15 * 60_000 },
 };
 
 export type LimitResult = { ok: true } | { ok: false; retryAfterSeconds: number };

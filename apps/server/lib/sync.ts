@@ -2,6 +2,7 @@ import {
   changeSetSize,
   emptyChangeSet,
   incomingWins,
+  newId,
   SYNC_PAGE_SIZE,
   type Card,
   type ChangeSet,
@@ -53,22 +54,29 @@ function unpackList(raw: string): string[] {
 
 type StoredMeta = { id: string; userId: string; updatedAt: Date };
 const META_SELECT = { id: true, userId: true, updatedAt: true } as const;
+const META_SELECT_WITH_REPO = { id: true, userId: true, updatedAt: true, repoId: true } as const;
 
 /**
  * 들어온 행 하나를 적용할지 판정한다.
  *
- * - 남의 레코드면 `forbidden`
+ * - 권한이 없으면 `forbidden`
  * - 서버 값이 더 최신이면 `stale`
  * - 그 외에는 적용
+ *
+ * `authorized` 는 호출부가 미리 판단해서 넘긴다 — 레포 멤버십 기준이
+ * 종류마다 다르기 때문이다(레포 멤버 전원 공유 vs 프로젝트 독립 지식은
+ * 작성자 본인만). 판정 기준은 **기존 행이 속한 레포**로 한다 — 들어오는
+ * payload 가 주장하는 repoId 로 판단하면, 다른 레포 멤버가 남의 행을
+ * "내 레포 소속"이라 우기고 뺏어갈 수 있다.
  */
 function judge(
   kind: Rejection["kind"],
   incoming: { id: string; updatedAt: number },
   existing: StoredMeta | null,
-  userId: string,
+  authorized: boolean,
 ): Rejection | null {
   if (existing === null) return null;
-  if (existing.userId !== userId) {
+  if (!authorized) {
     return { kind, id: incoming.id, reason: "forbidden", serverUpdatedAt: null };
   }
   if (!incomingWins(incoming, { updatedAt: toMs(existing.updatedAt), id: existing.id })) {
@@ -93,36 +101,69 @@ export async function applyChanges(userId: string, changes: ChangeSet): Promise<
   if (changeSetSize(changes) === 0) return rejected;
 
   await prisma.$transaction(async (tx) => {
+    // 이 트랜잭션 동안 유효한 멤버십. 새 레포가 이 안에서 만들어지면
+    // 곧바로 여기 추가한다 — "레포 → 컬럼 → 카드"가 한 번의 동기화로
+    // 같이 올라오는 게 정상이라, 방금 만든 레포의 자식들도 같은 요청
+    // 안에서 통과해야 한다.
+    const memberships = await tx.repoMember.findMany({ where: { userId }, select: { repoId: true } });
+    const memberRepoIds = new Set(memberships.map((m) => m.repoId));
+
     const owns = {
-      repo: async (id: string) =>
-        (await tx.repo.findUnique({ where: { id }, select: { userId: true } }))?.userId === userId,
+      // "이 repoId 가 실제로 존재하고, 요청자가 그 레포의 멤버인가."
+      // 존재하지 않는 repoId 는 애초에 memberRepoIds 에 없으므로 존재
+      // 확인과 멤버십 확인을 겸한다.
+      repo: (id: string) => memberRepoIds.has(id),
+      // 카드의 부모 컬럼은 존재만 확인한다 — 권한은 레포 멤버십으로 이미
+      // 걸렀으니 컬럼 자체의 소유자 개념은 더 이상 의미가 없다.
       column: async (id: string) =>
-        (await tx.column.findUnique({ where: { id }, select: { userId: true } }))?.userId === userId,
-      entry: async (id: string) =>
-        (await tx.wikiEntry.findUnique({ where: { id }, select: { userId: true } }))?.userId ===
-        userId,
+        (await tx.column.findUnique({ where: { id }, select: { id: true } })) !== null,
+      // wiki 엔트리는 repoId 가 있으면 그 레포 멤버, null 이면(프로젝트
+      // 독립 지식) 작성자 본인만 — 임베딩의 권한이 여기 그대로 얹힌다.
+      entry: async (id: string) => {
+        const e = await tx.wikiEntry.findUnique({
+          where: { id },
+          select: { userId: true, repoId: true },
+        });
+        if (!e) return false;
+        return e.repoId === null ? e.userId === userId : memberRepoIds.has(e.repoId);
+      },
       // repoId 가 null 인 건 "프로젝트 독립"이라는 뜻이지 부모 누락이 아니다.
-      optionalRepo: async (id: string | null) => (id === null ? true : owns.repo(id)),
+      optionalRepo: (id: string | null) => (id === null ? true : owns.repo(id)),
     };
 
     for (const repo of changes.repos) {
       const existing = await tx.repo.findUnique({ where: { id: repo.id }, select: META_SELECT });
-      const verdict = judge("repos", repo, existing, userId);
+      const authorized = existing === null || memberRepoIds.has(existing.id);
+      const verdict = judge("repos", repo, existing, authorized);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
       await writeRepo(tx, userId, repo, await nextSeq(tx));
+      if (existing === null) {
+        // 만든 사람이 곧 첫 멤버다 — 안 하면 다음 pull 에서 자기 레포가
+        // 자기한테 안 보인다(pull 도 멤버십 기준으로 거르므로).
+        await tx.repoMember.upsert({
+          where: { repoId_userId: { repoId: repo.id, userId } },
+          create: { id: newId(), repoId: repo.id, userId },
+          update: {},
+        });
+        memberRepoIds.add(repo.id);
+      }
     }
 
     for (const column of changes.columns) {
-      const existing = await tx.column.findUnique({ where: { id: column.id }, select: META_SELECT });
-      const verdict = judge("columns", column, existing, userId);
+      const existing = await tx.column.findUnique({
+        where: { id: column.id },
+        select: META_SELECT_WITH_REPO,
+      });
+      const authorized = existing === null || memberRepoIds.has(existing.repoId ?? "");
+      const verdict = judge("columns", column, existing, authorized);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
-      if (!(await owns.repo(column.repoId))) {
+      if (!owns.repo(column.repoId)) {
         rejected.push(missingParent("columns", column.id));
         continue;
       }
@@ -130,13 +171,17 @@ export async function applyChanges(userId: string, changes: ChangeSet): Promise<
     }
 
     for (const card of changes.cards) {
-      const existing = await tx.card.findUnique({ where: { id: card.id }, select: META_SELECT });
-      const verdict = judge("cards", card, existing, userId);
+      const existing = await tx.card.findUnique({
+        where: { id: card.id },
+        select: META_SELECT_WITH_REPO,
+      });
+      const authorized = existing === null || memberRepoIds.has(existing.repoId ?? "");
+      const verdict = judge("cards", card, existing, authorized);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
-      if (!((await owns.repo(card.repoId)) && (await owns.column(card.columnId)))) {
+      if (!(owns.repo(card.repoId) && (await owns.column(card.columnId)))) {
         rejected.push(missingParent("cards", card.id));
         continue;
       }
@@ -146,14 +191,17 @@ export async function applyChanges(userId: string, changes: ChangeSet): Promise<
     for (const entry of changes.wikiEntries) {
       const existing = await tx.wikiEntry.findUnique({
         where: { id: entry.id },
-        select: META_SELECT,
+        select: META_SELECT_WITH_REPO,
       });
-      const verdict = judge("wikiEntries", entry, existing, userId);
+      const authorized =
+        existing === null ||
+        (existing.repoId === null ? existing.userId === userId : memberRepoIds.has(existing.repoId));
+      const verdict = judge("wikiEntries", entry, existing, authorized);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
-      if (!(await owns.optionalRepo(entry.repoId))) {
+      if (!owns.optionalRepo(entry.repoId)) {
         rejected.push(missingParent("wikiEntries", entry.id));
         continue;
       }
@@ -165,12 +213,17 @@ export async function applyChanges(userId: string, changes: ChangeSet): Promise<
         where: { id: embedding.id },
         select: META_SELECT,
       });
-      const verdict = judge("embeddings", embedding, existing, userId);
+      // embedding 자체엔 repoId 가 없다 — 부모 wiki 엔트리를 한 번 타고
+      // 올라가서 판단한다(owns.entry 가 존재 확인과 겸함). 기존 행이 있는데
+      // 부모에 접근 못 하면 forbidden, 새 행인데 부모가 없으면 missingParent
+      // — judge() 가 existing 유무로 이미 그 둘을 갈라준다.
+      const parentOk = await owns.entry(embedding.entryId);
+      const verdict = judge("embeddings", embedding, existing, parentOk);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
-      if (!(await owns.entry(embedding.entryId))) {
+      if (!parentOk) {
         rejected.push(missingParent("embeddings", embedding.id));
         continue;
       }
@@ -179,12 +232,14 @@ export async function applyChanges(userId: string, changes: ChangeSet): Promise<
 
     for (const log of changes.searchLogs) {
       const existing = await tx.searchLog.findUnique({ where: { id: log.id }, select: META_SELECT });
-      const verdict = judge("searchLogs", log, existing, userId);
+      // 검색 기록은 공유 대상이 아니다 — 예나 지금이나 작성자 본인만.
+      const authorized = existing === null || existing.userId === userId;
+      const verdict = judge("searchLogs", log, existing, authorized);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
-      if (!(await owns.optionalRepo(log.repoId))) {
+      if (!owns.optionalRepo(log.repoId)) {
         rejected.push(missingParent("searchLogs", log.id));
         continue;
       }
@@ -344,16 +399,35 @@ export type PullResult = { cursor: number; changes: ChangeSet; hasMore: boolean 
 export async function pullChanges(userId: string, cursor: number): Promise<PullResult> {
   // 종류별로 페이지 크기만큼 넉넉히 읽고, seq 순으로 잘라낸다.
   const take = SYNC_PAGE_SIZE + 1;
-  const where = { userId, seq: { gt: cursor } };
   const orderBy = { seq: "asc" } as const;
 
+  // 레포/컬럼/카드/wiki/임베딩은 이제 "내가 만든 것"이 아니라 "내가 멤버인
+  // 레포에 속한 것" 기준으로 내려간다. 검색 기록만 예외 — 순수 개인 기록.
+  const memberships = await prisma.repoMember.findMany({ where: { userId }, select: { repoId: true } });
+  const memberRepoIds = memberships.map((m) => m.repoId);
+
+  const repoWhere = { id: { in: memberRepoIds }, seq: { gt: cursor } };
+  const repoScopedWhere = { repoId: { in: memberRepoIds }, seq: { gt: cursor } };
+  // wiki 는 repoId 가 null(프로젝트 독립 지식)이면 본인 것만, 있으면 그
+  // 레포 멤버 전원.
+  const wikiWhere = {
+    seq: { gt: cursor },
+    OR: [{ repoId: null, userId }, { repoId: { in: memberRepoIds } }],
+  };
+  // 임베딩엔 repoId 가 없으니 부모 wiki 엔트리를 relation filter 로 탄다.
+  const embeddingWhere = {
+    seq: { gt: cursor },
+    entry: { OR: [{ repoId: null, userId }, { repoId: { in: memberRepoIds } }] },
+  };
+  const searchLogWhere = { userId, seq: { gt: cursor } };
+
   const [repos, columns, cards, wikiEntries, embeddings, searchLogs] = await Promise.all([
-    prisma.repo.findMany({ where, orderBy, take }),
-    prisma.column.findMany({ where, orderBy, take }),
-    prisma.card.findMany({ where, orderBy, take }),
-    prisma.wikiEntry.findMany({ where, orderBy, take }),
-    prisma.embedding.findMany({ where, orderBy, take }),
-    prisma.searchLog.findMany({ where, orderBy, take }),
+    prisma.repo.findMany({ where: repoWhere, orderBy, take }),
+    prisma.column.findMany({ where: repoScopedWhere, orderBy, take }),
+    prisma.card.findMany({ where: repoScopedWhere, orderBy, take }),
+    prisma.wikiEntry.findMany({ where: wikiWhere, orderBy, take }),
+    prisma.embedding.findMany({ where: embeddingWhere, orderBy, take }),
+    prisma.searchLog.findMany({ where: searchLogWhere, orderBy, take }),
   ]);
 
   // 여러 종류를 하나의 seq 수열로 합쳐서 앞에서부터 SYNC_PAGE_SIZE 개만 취한다.
