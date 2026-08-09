@@ -6,3 +6,5 @@ export * from "./kanban.js";
 export * from "./wiki.js";
 export * from "./embedding.js";
 export * from "./link.js";
+export * from "./git.js";
+export * from "./backfill.js";

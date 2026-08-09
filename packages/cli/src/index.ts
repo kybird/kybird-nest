@@ -26,6 +26,8 @@ import {
 import { changeSetSize } from "@kybird/shared";
 import { ask, askSecret } from "./prompt.js";
 import { wikiCommand, WIKI_HELP } from "./wiki-commands.js";
+import { backfillCommand, hookCommand, BACKFILL_HELP, HOOK_HELP } from "./hook-commands.js";
+import { runMcp } from "./mcp.js";
 
 const HELP = `knest — kybird-nest 명령줄 도구
 
@@ -39,6 +41,11 @@ const HELP = `knest — kybird-nest 명령줄 도구
   knest link [--name 이름]        현재 디렉토리를 레포에 연결한다
   knest sync                      서버와 맞춘다
   knest status                    아직 못 올린 변경과 충돌을 보여준다
+
+에이전트
+  knest mcp                       MCP 서버로 붙는다 (에이전트가 실행)
+  knest hook install              git 훅을 심는다 (커밋을 큐에 넣는다)
+  knest backfill                  밀린 커밋의 재료를 꺼낸다
 
 wiki
   knest wiki add <제목>           지식을 넣는다 (본문은 표준입력)
@@ -97,6 +104,12 @@ async function main(argv: string[]): Promise<number> {
       return conflicts(rest);
     case "wiki":
       return wikiTopLevel(rest);
+    case "mcp":
+      return mcpTopLevel();
+    case "hook":
+      return hookTopLevel(rest);
+    case "backfill":
+      return backfillTopLevel(rest);
     default:
       process.stderr.write(`알 수 없는 명령: ${command}\n\n${HELP}`);
       return 1;
@@ -378,6 +391,57 @@ async function wikiTopLevel(argv: string[]): Promise<number> {
   }
   return withRepo(async (store, repoId) => {
     const code = await wikiCommand(argv, { store, repoId });
+    await trySync(store);
+    return code;
+  });
+}
+
+// ---- 에이전트 표면 ----
+
+/**
+ * MCP 서버. 에이전트가 이걸 자식 프로세스로 띄우고 stdio 로 말한다.
+ * 그래서 여기서는 **stdout 에 아무것도 쓰면 안 된다** — 프로토콜이 쓴다.
+ */
+async function mcpTopLevel(): Promise<number> {
+  const linked = findLink(process.cwd());
+  if (!linked) {
+    process.stderr.write("이 디렉토리는 레포에 연결돼 있지 않다. knest link\n");
+    return 1;
+  }
+  const store = openStore();
+  if (!store.getRepo(linked.link.repoId)) {
+    process.stderr.write("연결된 레포가 로컬에 없다. knest sync 를 먼저 해라.\n");
+    store.close();
+    return 1;
+  }
+  await runMcp({ store, repoId: linked.link.repoId, repoPath: process.cwd() });
+  return 0;
+}
+
+/**
+ * 훅 명령은 레포 연결을 요구하지 않는다 —  는 훅이 부르는데,
+ * 연결이 안 돼 있으면 조용히 아무것도 안 하고 끝나야 하기 때문이다.
+ */
+function hookTopLevel(argv: string[]): number {
+  if (argv[0] === undefined || argv[0] === "help") {
+    process.stdout.write(HOOK_HELP);
+    return 0;
+  }
+  const store = openStore();
+  try {
+    return hookCommand(argv, store);
+  } finally {
+    store.close();
+  }
+}
+
+async function backfillTopLevel(argv: string[]): Promise<number> {
+  if (argv[0] === "help") {
+    process.stdout.write(BACKFILL_HELP);
+    return 0;
+  }
+  return withRepo(async (store, repoId) => {
+    const code = backfillCommand(argv, store, repoId);
     await trySync(store);
     return code;
   });

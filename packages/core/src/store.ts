@@ -163,6 +163,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
   tokenize = 'unicode61'
 );
 
+/*
+ * 아직 지식으로 소화되지 않은 커밋들.
+ *
+ * git hook 이 여기에 넣기만 하고 즉시 끝낸다 — 훅에서 LLM 을 부르면
+ * 커밋이 느려지고, 느려지면 --no-verify 로 꺼버리게 된다.
+ *
+ * 이 큐는 **동기화하지 않는다.** 커밋은 이 머신의 클론에만 있고, 다른
+ * 머신에서 같은 해시를 소화하려 해도 그쪽 작업 디렉토리를 봐야 한다.
+ */
+CREATE TABLE IF NOT EXISTS ingest_queue (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  repoId      TEXT NOT NULL,
+  repoPath    TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  ref         TEXT NOT NULL,
+  createdAt   INTEGER NOT NULL,
+  processedAt INTEGER,
+  -- kind 를 키에 넣으면 post-commit 과 pre-push 가 같은 커밋을 두 번 올린다.
+  -- 소화 단위는 커밋이지 훅이 아니다.
+  UNIQUE(repoId, ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_pending ON ingest_queue(repoId, processedAt);
 CREATE INDEX IF NOT EXISTS idx_columns_repo ON board_columns(repoId);
 CREATE INDEX IF NOT EXISTS idx_cards_repo    ON cards(repoId);
 CREATE INDEX IF NOT EXISTS idx_cards_column  ON cards(columnId);
@@ -176,7 +199,20 @@ CREATE INDEX IF NOT EXISTS idx_emb_dirty     ON embeddings(dirty);
 CREATE INDEX IF NOT EXISTS idx_logs_dirty    ON search_logs(dirty);
 `;
 
+/** 로컬 스토어 스키마 버전. 모양을 바꾸면 올리고 `migrate` 에 처리를 넣는다. */
+const STORE_VERSION = 2;
+
 type Row = Record<string, unknown>;
+
+export type IngestItem = {
+  id: number;
+  repoId: string;
+  repoPath: string;
+  kind: string;
+  ref: string;
+  createdAt: number;
+  processedAt: number | null;
+};
 
 export type ConflictRecord = {
   id: number;
@@ -194,7 +230,44 @@ export class Store {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
+
+    // 스키마가 바뀌어도 CREATE TABLE IF NOT EXISTS 는 기존 테이블을 손대지 않는다.
+    // 그래서 낡은 모양이 조용히 살아남는다 — 버전을 보고 먼저 정리한다.
+    this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    this.migrate();
     this.db.exec(SCHEMA);
+    this.setMeta("storeVersion", String(STORE_VERSION));
+  }
+
+  /**
+   * 로컬 스토어 마이그레이션.
+   *
+   * 여긴 서버가 아니라 작업 사본이라 과감해도 된다 — 동기화되는 것은 서버에서
+   * 다시 받아오면 되고, 큐는 git 이력에서 다시 채우면 된다(`backfill seed`).
+   */
+  private migrate(): void {
+    const current = Number(this.getMeta("storeVersion") ?? "1");
+    if (current >= STORE_VERSION) return;
+
+    if (current < 2) {
+      // 유니크 키가 (repoId, kind, ref) 였다 — 같은 커밋이 두 번 큐에 올랐다.
+      this.db.exec("DROP TABLE IF EXISTS ingest_queue");
+    }
+  }
+
+  private getMeta(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  private setMeta(key: string, value: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, value);
   }
 
   close(): void {
@@ -232,8 +305,12 @@ export class Store {
     this.transaction(() => {
       for (const table of Object.values(TABLE)) this.db.prepare(`DELETE FROM ${table}`).run();
       this.db.prepare("DELETE FROM wiki_fts").run();
+      this.db.prepare("DELETE FROM ingest_queue").run();
       this.db.prepare("DELETE FROM conflicts").run();
       this.db.prepare("DELETE FROM meta").run();
+      // 스키마 버전은 데이터가 아니라 이 파일의 모양이다. 지우면 다음 열 때
+      // 낡은 스토어로 오인해 마이그레이션이 다시 돈다.
+      this.setMeta("storeVersion", String(STORE_VERSION));
     });
   }
 
@@ -558,6 +635,60 @@ export class Store {
       | { dirty: number }
       | undefined;
     return row?.dirty === 1;
+  }
+
+  // ---- 주입 큐 ----
+
+  /**
+   * 소화할 커밋을 큐에 넣는다. 같은 커밋을 두 번 넣어도 한 건이다 —
+   * 훅이 여러 번 돌 수도 있고, 그때마다 중복이 쌓이면 안 된다.
+   */
+  enqueueIngest(item: {
+    repoId: string;
+    repoPath: string;
+    kind: string;
+    ref: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO ingest_queue (repoId, repoPath, kind, ref, createdAt)
+         VALUES (@repoId, @repoPath, @kind, @ref, @createdAt)
+         ON CONFLICT(repoId, ref) DO NOTHING`,
+      )
+      .run({ ...item, createdAt: Date.now() });
+  }
+
+  listPendingIngest(repoId?: string, limit = 50): IngestItem[] {
+    const rows =
+      repoId === undefined
+        ? this.db
+            .prepare(
+              "SELECT * FROM ingest_queue WHERE processedAt IS NULL ORDER BY createdAt LIMIT ?",
+            )
+            .all(limit)
+        : this.db
+            .prepare(
+              "SELECT * FROM ingest_queue WHERE processedAt IS NULL AND repoId = ? ORDER BY createdAt LIMIT ?",
+            )
+            .all(repoId, limit);
+    return rows as IngestItem[];
+  }
+
+  countPendingIngest(repoId?: string): number {
+    const row = (
+      repoId === undefined
+        ? this.db.prepare("SELECT COUNT(*) AS n FROM ingest_queue WHERE processedAt IS NULL").get()
+        : this.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM ingest_queue WHERE processedAt IS NULL AND repoId = ?",
+            )
+            .get(repoId)
+    ) as { n: number };
+    return row.n;
+  }
+
+  markIngested(id: number): void {
+    this.db.prepare("UPDATE ingest_queue SET processedAt = ? WHERE id = ?").run(Date.now(), id);
   }
 
   // ---- 충돌 보관 ----
