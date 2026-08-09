@@ -27,12 +27,17 @@ sudo usermod -aG docker $USER   # 재로그인 필요
 
 ```bash
 git clone https://github.com/kybird/kybird-nest.git
-cd kybird-nest
+cd kybird-nest/deploy
 ```
+
+아래 명령들은 전부 이 `deploy/` 디렉토리 기준이다 (`docker-compose.yml`,
+`Dockerfile`, `docker/`, 이 문서까지 전부 여기 모여있다). 빌드 컨텍스트는
+`docker-compose.yml` 안에서 레포 루트(`..`)를 가리키도록 이미 설정돼있다.
 
 ## 2. 환경변수
 
-`.env` 를 레포 루트에 만든다 (커밋하지 않는다 — `.gitignore` 에 이미 있다):
+`.env` 를 `deploy/` 안에 만든다 (커밋하지 않는다 — `.gitignore` 에 이미
+`.env` 패턴이 있어서 어느 위치든 걸린다):
 
 ```bash
 # 가입 초대 코드. 비워두면 가입이 완전히 닫힌다.
@@ -53,8 +58,14 @@ KNEST_PORT=3000
 ## 3. 빌드와 기동
 
 ```bash
-docker compose build
-docker compose up -d
+./build.sh   # docker compose build. .env 없으면 여기서 바로 실패한다
+./run.sh     # up -d 하고 /login 이 200 뜰 때까지 최대 30초 기다린다
+```
+
+멈추려면 `./stop.sh` (컨테이너만 멈춘다, 볼륨은 안 건드린다). 로그를
+계속 보고 싶으면:
+
+```bash
 docker compose logs -f server   # 마이그레이션과 시작 로그 확인
 ```
 
@@ -68,44 +79,71 @@ curl -s http://127.0.0.1:3000/login -o /dev/null -w '%{http_code}\n'
 # 200 이어야 한다
 ```
 
-## 4. 기존 리버스 프록시에 연결
+## 4. 기존 리버스 프록시(nginx)에 연결 — 포트 기반
 
-`server` 는 `127.0.0.1:${KNEST_PORT}` 에만 묶인다 (`docker-compose.yml`).
-공인 IP 로 직접 노출되지 않는다 — 기존 프록시가 vhost 를 하나 추가해서
-이 포트로 넘겨주면 된다.
+이 VPS 는 **nginx + Certbot**(서브도메인별 개별 인증서)을 이미 쓰고 있다.
+**dynu.net 무료 플랜의 호스트 개수 제한에 걸려 새 서브도메인을 못 만든다**
+— 그래서 새 도메인이 아니라 **기존 도메인 `doall.kybird.dynu.net` 의
+인증서를 그대로 재사용**하고, 포트만 새로 연다(`8443`). TLS 는 호스트명
+기준으로 검증되므로 포트가 달라도 브라우저는 문제 삼지 않는다. 데이터나
+서비스가 registry(기존에 `doall.kybird.dynu.net` 을 쓰던 서비스)와 섞이는
+건 아니다 — 인증서만 공유한다.
 
-**Caddy** 를 쓰고 있다면 `Caddyfile` 에 이 블록만 추가:
-
-```
-nest.내도메인.example {
-    reverse_proxy 127.0.0.1:3000
-}
-```
-
-Caddy 가 그 서브도메인의 TLS 를 알아서 받아온다. **nginx** 라면:
+`server` 는 `127.0.0.1:${KNEST_PORT}` 에만 묶인다 (`docker-compose.yml`) —
+공인 IP 로 직접 노출되지 않는다. `/etc/nginx/sites-available/knest.conf`
+를 만들고 `sites-enabled` 에 링크:
 
 ```nginx
 server {
-    listen 443 ssl;
-    server_name nest.내도메인.example;
-    # 기존 인증서 설정 재사용
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+    server_name doall.kybird.dynu.net;
+
+    client_max_body_size 20M;
+
+    ssl_certificate /etc/letsencrypt/live/doall.kybird.dynu.net/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/doall.kybird.dynu.net/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Host $host;
     }
 }
 ```
 
-`X-Forwarded-For` 를 반드시 넘겨야 한다 — `KNEST_TRUST_PROXY=1` 인 상태에서
-이게 없으면 레이트 리밋이 모든 요청을 같은 사용자로 본다.
+```bash
+sudo ln -s /etc/nginx/sites-available/knest.conf /etc/nginx/sites-enabled/knest.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Certbot 을 다시 돌릴 필요 없다 — 인증서는 이미 있는 걸 경로로만 참조한다
+(자동 갱신 시 `doall.kybird.dynu.net` 의 다른 vhost 와 같이 갱신된다).
+
+**포트를 두 군데서 열어야 한다:**
+
+1. OS 방화벽(활성화돼 있다면):
+   ```bash
+   sudo ufw status                 # 활성 상태면
+   sudo ufw allow 8443/tcp
+   ```
+2. **Oracle Cloud 콘솔** → 인스턴스의 VCN → Security List (또는 NSG) →
+   Ingress Rules 에 `8443/tcp` 허용 규칙 추가. 이건 콘솔에서만 되고
+   VPS 안에서는 안 보인다 — 놓치면 nginx 는 정상인데 밖에서 접속이
+   막힌 것처럼 보인다.
+
+`X-Forwarded-For` 는 위 블록에 이미 있다 — `KNEST_TRUST_PROXY=1` 인
+상태에서 이게 없으면 레이트 리밋이 모든 요청을 같은 사용자로 본다.
 
 ## 5. 클라이언트를 서버에 연결
 
 ```bash
-knest register --server https://nest.내도메인.example --invite <위에서 정한 코드>
+knest register --server https://doall.kybird.dynu.net:8443 --invite <위에서 정한 코드>
 knest link
 ```
 
@@ -132,7 +170,7 @@ knest link
 누락). `.backup` 은 서버가 도는 중에도 일관된 사본을 만든다.
 
 지금은 **로컬 스냅샷만** — 인스턴스가 통째로 사라지면 백업도 같이 사라진다.
-오프사이트로 보내려면 `docker/backup-loop.sh` 의 `snapshot()` 끝에
+오프사이트로 보내려면 `deploy/docker/backup-loop.sh` 의 `snapshot()` 끝에
 `rclone`/`aws s3 cp` 한 줄을 추가하면 된다. 나중으로 미룬 부분이다.
 
 복구:
@@ -150,12 +188,12 @@ docker compose start server
 
 ```bash
 git pull
-docker compose build
-docker compose up -d
+./build.sh
+./run.sh
 ```
 
 마이그레이션은 컨테이너 시작 시 `prisma migrate deploy` 로 자동 적용된다
-(`docker/entrypoint.sh`). `migrate dev` 가 아니다 — dev 는 스키마 드리프트를
+(`deploy/docker/entrypoint.sh`). `migrate dev` 가 아니다 — dev 는 스키마 드리프트를
 보면 DB 를 리셋하려 드는데, 프로덕션에서 그건 데이터 전멸이다.
 
 ## 미결

@@ -83,7 +83,7 @@ COPY --from=builder --chown=node:node /app/node_modules/prisma ./node_modules/pr
 COPY --from=builder --chown=node:node /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder --chown=node:node /app/node_modules/dotenv ./node_modules/dotenv
 
-COPY --chown=node:node docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=node:node deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER node
