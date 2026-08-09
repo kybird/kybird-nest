@@ -51,7 +51,13 @@ RUN npm run build --workspace @kybird/shared
 WORKDIR /app/apps/server
 # 생성물이 없으면 빌드가 타입을 못 찾는다. 스키마만 있으면 되고 DB 는 필요 없다.
 RUN npx prisma generate
-# 빌드 시점에는 DB 에 붙지 않는다. 실제 경로는 런타임 환경변수로 온다.
+
+# 빌드 시점에는 DB 에 실제로 쿼리하지 않지만, lib/prisma.ts 가 모듈
+# 스코프에서 PrismaClient(better-sqlite3 어댑터)를 바로 생성해서 Next 의
+# 정적 페이지 수집(/api/auth/register 등 임포트) 때 DATABASE_URL 이 없으면
+# 죽는다. 더미 경로만 있으면 된다 — 이 파일은 이미지에 안 남는다(빌더
+# 스테이지 전용). 실제 경로는 런타임에 docker-compose 의 환경변수로 온다.
+ENV DATABASE_URL="file:/tmp/build-placeholder.db"
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npx next build
 
