@@ -85,14 +85,16 @@ COPY --from=builder --chown=node:node /app/apps/server/public ./apps/server/publ
 
 # 마이그레이션은 런타임에 돈다. 스키마·설정·CLI 가 있어야 한다.
 #
-# .bin 은 복사하지 않는다 — 심볼릭 링크라 레이어를 넘나들면 깨지기 쉽다.
-# 진입점(build/index.js)을 node 로 직접 부른다.
-# dotenv 는 prisma.config.ts 가 import 하므로 없으면 마이그레이션이 죽는다.
+# prisma CLI 패키지만 골라 복사했더니 Prisma 7 의 설정 시스템(@prisma/config)이
+# 끌고 오는 하위 의존성(effect, c12, deepmerge-ts, empathic, ...)이 하나씩
+# 빠져서 실제 서버에서 "Cannot find module 'effect'" 로 죽는 걸 확인했다.
+# 버전 올라갈 때마다 또 깨지기 쉬우니, builder 의 node_modules 전체를 그대로
+# 가져온다 — standalone 트리 위에 덮어써지는 형태라 next 런타임에 필요한
+# 트레이싱된 버전과 안 겹치는 나머지만 채워 넣는 셈이다. core 는 애초에
+# npm ci 에서 뺐으니 여기 들어있는 것도 무겁지 않다.
 COPY --from=builder --chown=node:node /app/apps/server/prisma ./apps/server/prisma
 COPY --from=builder --chown=node:node /app/apps/server/prisma.config.ts ./apps/server/prisma.config.ts
-COPY --from=builder --chown=node:node /app/node_modules/prisma ./node_modules/prisma
-COPY --from=builder --chown=node:node /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder --chown=node:node /app/node_modules/dotenv ./node_modules/dotenv
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 
 COPY --chown=node:node deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
