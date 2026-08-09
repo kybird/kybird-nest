@@ -29,7 +29,12 @@ COPY apps/server/package.json apps/server/
 # core 를 빼는 게 핵심이다 — transformers 트리(sharp, onnxruntime, adm-zip)가
 # 통째로 사라진다. 이미지가 작아지는 것도 있지만, onnxruntime 은 arm64 프리빌드가
 # 없으면 설치 자체가 실패할 수 있어서 아예 안 건드리는 게 안전하다.
-RUN npm ci --include-workspace-root \
+#
+# --ignore-scripts: apps/server 의 postinstall(`prisma generate`)이 여기서
+# 같이 도는데, 이 시점엔 package.json 만 있고 prisma/schema.prisma 는 아직
+# 없어서 실패한다. generate 는 builder 스테이지에서 소스 전체가 들어온 뒤
+# 명시적으로 다시 돈다 — 여기서는 그냥 건너뛴다.
+RUN npm ci --include-workspace-root --ignore-scripts \
       --workspace=@kybird/shared \
       --workspace=@kybird/server
 
