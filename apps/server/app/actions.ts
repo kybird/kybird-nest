@@ -1,11 +1,15 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { credentialsSchema, newId } from "@kybird/shared";
 import { prisma } from "@/lib/prisma";
 import { generateToken, hashPassword, verifyPassword } from "@/lib/auth";
 import { clearSession, currentUser, setSession } from "@/lib/session";
+import { config } from "@/lib/config";
+import { inviteMatches } from "@/lib/invite";
+import { checkRateLimit } from "@/lib/rate-limit";
 import * as boardOps from "@/lib/board";
 
 /** 로그인/가입 실패는 예외가 아니라 화면에 보여줄 메시지다. */
@@ -13,6 +17,15 @@ export type FormState = { error: string } | null;
 
 export async function authAction(_prev: FormState, formData: FormData): Promise<FormState> {
   const mode = String(formData.get("mode") ?? "login");
+
+  // 서버 액션도 인증 경로다. API 라우트만 막으면 여기로 그대로 우회된다.
+  // 헤더는 액션 요청의 것을 그대로 쓴다.
+  const request = new Request("http://internal/", { headers: await headers() });
+  const limit = checkRateLimit(request, mode === "register" ? "register" : "login");
+  if (!limit.ok) {
+    return { error: `시도가 너무 잦다. ${limit.retryAfterSeconds}초 후에 다시 해라.` };
+  }
+
   const parsed = credentialsSchema.safeParse({
     email: formData.get("email"),
     password: formData.get("password"),
@@ -23,6 +36,11 @@ export async function authAction(_prev: FormState, formData: FormData): Promise<
   const { email, password } = parsed.data;
 
   if (mode === "register") {
+    if (!config.registrationOpen) return { error: "가입이 닫혀 있다" };
+    if (!inviteMatches(String(formData.get("invite") ?? ""))) {
+      return { error: "초대 코드가 맞지 않다" };
+    }
+
     const existing = await prisma.user.findUnique({ where: { email }, select: { id: true } });
     if (existing) return { error: "이미 가입된 이메일이다" };
 

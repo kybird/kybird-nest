@@ -15,10 +15,36 @@ const scrypt = promisify(scryptCb) as (
 const SCRYPT = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 } as const;
 const KEY_LENGTH = 32;
 
+/**
+ * 동시에 도는 scrypt 개수를 묶어둔다.
+ *
+ * 레이트 리밋은 "얼마나 자주"를 막지만 메모리 문제는 "동시에 몇 개"다.
+ * 시도당 33MB 이므로 동시 요청이 몰리면 그대로 OOM 이다. 공개 노출된
+ * 서버에서는 이게 실질적인 DoS 경로라, 속도를 조금 포기하고 상한을 건다.
+ *
+ * 4개면 최대 약 134MB. 대기는 레이트 리밋이 이미 앞단에서 걸러낸 뒤다.
+ */
+const MAX_CONCURRENT_HASHES = 4;
+let running = 0;
+const waiting: Array<() => void> = [];
+
+async function withHashSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (running >= MAX_CONCURRENT_HASHES) {
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  }
+  running++;
+  try {
+    return await fn();
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
 /** `scrypt$N$r$p$salt$hash` — 파라미터를 같이 저장해야 나중에 올려도 기존 해시를 검증할 수 있다. */
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
-  const key = await scrypt(password, salt, KEY_LENGTH, SCRYPT);
+  const key = await withHashSlot(() => scrypt(password, salt, KEY_LENGTH, SCRYPT));
   return [
     "scrypt",
     SCRYPT.N,
@@ -40,12 +66,14 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const expected = Buffer.from(parts[5]!, "base64");
   if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p)) return false;
 
-  const actual = await scrypt(password, salt, expected.length, {
-    N,
-    r,
-    p,
-    maxmem: Math.max(SCRYPT.maxmem, 256 * N * r),
-  });
+  const actual = await withHashSlot(() =>
+    scrypt(password, salt, expected.length, {
+      N,
+      r,
+      p,
+      maxmem: Math.max(SCRYPT.maxmem, 256 * N * r),
+    }),
+  );
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 

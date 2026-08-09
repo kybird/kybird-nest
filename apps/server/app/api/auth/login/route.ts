@@ -1,8 +1,14 @@
 import { credentialsSchema, newId, type AuthResult } from "@kybird/shared";
 import { prisma } from "@/lib/prisma";
 import { generateToken, verifyPassword } from "@/lib/auth";
+import { checkRateLimit, tooManyRequests } from "@/lib/rate-limit";
 
 export async function POST(request: Request): Promise<Response> {
+  // 비밀번호 검증보다 **먼저** 센다. scrypt 는 시도당 33MB 라,
+  // 검증한 다음에 세는 건 아무 방어도 되지 않는다.
+  const limit = checkRateLimit(request, "login");
+  if (!limit.ok) return tooManyRequests(limit.retryAfterSeconds);
+
   const parsed = credentialsSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return Response.json({ error: "이메일과 비밀번호가 필요하다" }, { status: 400 });

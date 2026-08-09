@@ -65,8 +65,11 @@ export async function register(
   baseUrl: string,
   email: string,
   password: string,
+  invite?: string,
 ): Promise<AuthResult> {
-  return authResultSchema.parse(await post(baseUrl, "/api/auth/register", { email, password }));
+  return authResultSchema.parse(
+    await post(baseUrl, "/api/auth/register", { email, password, invite }),
+  );
 }
 
 export async function login(baseUrl: string, email: string, password: string): Promise<AuthResult> {

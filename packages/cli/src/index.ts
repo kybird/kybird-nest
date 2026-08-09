@@ -32,7 +32,8 @@ import { runMcp } from "./mcp.js";
 const HELP = `knest — kybird-nest 명령줄 도구
 
 계정
-  knest register [--server URL]   새 계정을 만들고 로그인한다
+  knest register [--server URL] [--invite 코드]
+                                  새 계정을 만들고 로그인한다
   knest login    [--server URL]   로그인한다
   knest logout                    토큰을 지운다 (로컬 스토어도 비운다)
   knest whoami                    현재 로그인 상태
@@ -67,6 +68,7 @@ wiki
 환경변수
   KYBIRD_HOME       설정과 로컬 스토어 위치 (기본 ~/.kybird)
   KNEST_PASSWORD    비대화형 로그인용 비밀번호
+  KNEST_INVITE_CODE 가입 초대 코드 (--invite 대신)
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -121,7 +123,11 @@ async function main(argv: string[]): Promise<number> {
 async function authenticate(mode: "register" | "login", argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
-    options: { server: { type: "string" }, email: { type: "string" } },
+    options: {
+      server: { type: "string" },
+      email: { type: "string" },
+      invite: { type: "string" },
+    },
     allowPositionals: false,
   });
 
@@ -132,8 +138,10 @@ async function authenticate(mode: "register" | "login", argv: string[]): Promise
   // 비대화형(스크립트·CI)에서는 환경변수로 넘긴다. 평소에는 물어본다.
   const password = process.env["KNEST_PASSWORD"] ?? (await askSecret("비밀번호: "));
 
+  // 공개 서버는 초대 코드가 있어야 가입된다. 로그인에는 필요 없다.
+  const invite = values.invite ?? process.env["KNEST_INVITE_CODE"];
   const result = await (mode === "register"
-    ? register(serverUrl, email, password)
+    ? register(serverUrl, email, password, invite)
     : login(serverUrl, email, password));
 
   const next: Config = { serverUrl, token: result.token, email: result.user.email };
