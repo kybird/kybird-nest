@@ -1,12 +1,16 @@
 import {
-  SYNC_PAGE_SIZE,
+  changeSetSize,
   emptyChangeSet,
   incomingWins,
+  SYNC_PAGE_SIZE,
   type Card,
   type ChangeSet,
   type Column,
+  type Embedding,
   type Rejection,
   type Repo,
+  type SearchLog,
+  type WikiEntry,
 } from "@kybird/shared";
 import { prisma } from "./prisma";
 import type { Prisma } from "./generated/prisma/client";
@@ -36,7 +40,19 @@ const toMsOrNull = (d: Date | null): number | null => (d === null ? null : d.get
 const fromMs = (ms: number): Date => new Date(ms);
 const fromMsOrNull = (ms: number | null): Date | null => (ms === null ? null : new Date(ms));
 
+// 문자열 배열은 JSON 으로 저장한다. 서버는 내용을 해석하지 않는다.
+const packList = (values: string[]): string => JSON.stringify(values);
+function unpackList(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 type StoredMeta = { id: string; userId: string; updatedAt: Date };
+const META_SELECT = { id: true, userId: true, updatedAt: true } as const;
 
 /**
  * 들어온 행 하나를 적용할지 판정한다.
@@ -61,24 +77,36 @@ function judge(
   return null;
 }
 
+function missingParent(kind: Rejection["kind"], id: string): Rejection {
+  return { kind, id, reason: "missing_parent", serverUpdatedAt: null };
+}
+
 /**
  * 클라이언트가 올린 변경분을 적용한다.
  *
- * 적용 순서는 **의존성 순서(레포 → 컬럼 → 카드)** 다. 한 번의 동기화 안에서
- * 새 레포와 그 안의 카드가 같이 올라오는 게 정상이기 때문이다.
+ * 적용 순서는 **의존성 순서**다 — 레포 → 컬럼 → 카드, 레포 → wiki 엔트리 →
+ * 임베딩. 한 번의 동기화 안에서 새 레포와 그 안의 카드가 같이 올라오는 게
+ * 정상이기 때문이다.
  */
 export async function applyChanges(userId: string, changes: ChangeSet): Promise<Rejection[]> {
   const rejected: Rejection[] = [];
-  if (changes.repos.length + changes.columns.length + changes.cards.length === 0) {
-    return rejected;
-  }
+  if (changeSetSize(changes) === 0) return rejected;
 
   await prisma.$transaction(async (tx) => {
+    const owns = {
+      repo: async (id: string) =>
+        (await tx.repo.findUnique({ where: { id }, select: { userId: true } }))?.userId === userId,
+      column: async (id: string) =>
+        (await tx.column.findUnique({ where: { id }, select: { userId: true } }))?.userId === userId,
+      entry: async (id: string) =>
+        (await tx.wikiEntry.findUnique({ where: { id }, select: { userId: true } }))?.userId ===
+        userId,
+      // repoId 가 null 인 건 "프로젝트 독립"이라는 뜻이지 부모 누락이 아니다.
+      optionalRepo: async (id: string | null) => (id === null ? true : owns.repo(id)),
+    };
+
     for (const repo of changes.repos) {
-      const existing = await tx.repo.findUnique({
-        where: { id: repo.id },
-        select: { id: true, userId: true, updatedAt: true },
-      });
+      const existing = await tx.repo.findUnique({ where: { id: repo.id }, select: META_SELECT });
       const verdict = judge("repos", repo, existing, userId);
       if (verdict) {
         rejected.push(verdict);
@@ -88,71 +116,83 @@ export async function applyChanges(userId: string, changes: ChangeSet): Promise<
     }
 
     for (const column of changes.columns) {
-      const existing = await tx.column.findUnique({
-        where: { id: column.id },
-        select: { id: true, userId: true, updatedAt: true },
-      });
+      const existing = await tx.column.findUnique({ where: { id: column.id }, select: META_SELECT });
       const verdict = judge("columns", column, existing, userId);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
-      if (!(await ownsRepo(tx, userId, column.repoId))) {
-        rejected.push({
-          kind: "columns",
-          id: column.id,
-          reason: "missing_parent",
-          serverUpdatedAt: null,
-        });
+      if (!(await owns.repo(column.repoId))) {
+        rejected.push(missingParent("columns", column.id));
         continue;
       }
       await writeColumn(tx, userId, column, await nextSeq(tx));
     }
 
     for (const card of changes.cards) {
-      const existing = await tx.card.findUnique({
-        where: { id: card.id },
-        select: { id: true, userId: true, updatedAt: true },
-      });
+      const existing = await tx.card.findUnique({ where: { id: card.id }, select: META_SELECT });
       const verdict = judge("cards", card, existing, userId);
       if (verdict) {
         rejected.push(verdict);
         continue;
       }
-      const parentsOk =
-        (await ownsRepo(tx, userId, card.repoId)) && (await ownsColumn(tx, userId, card.columnId));
-      if (!parentsOk) {
-        rejected.push({
-          kind: "cards",
-          id: card.id,
-          reason: "missing_parent",
-          serverUpdatedAt: null,
-        });
+      if (!((await owns.repo(card.repoId)) && (await owns.column(card.columnId)))) {
+        rejected.push(missingParent("cards", card.id));
         continue;
       }
       await writeCard(tx, userId, card, await nextSeq(tx));
     }
+
+    for (const entry of changes.wikiEntries) {
+      const existing = await tx.wikiEntry.findUnique({
+        where: { id: entry.id },
+        select: META_SELECT,
+      });
+      const verdict = judge("wikiEntries", entry, existing, userId);
+      if (verdict) {
+        rejected.push(verdict);
+        continue;
+      }
+      if (!(await owns.optionalRepo(entry.repoId))) {
+        rejected.push(missingParent("wikiEntries", entry.id));
+        continue;
+      }
+      await writeWikiEntry(tx, userId, entry, await nextSeq(tx));
+    }
+
+    for (const embedding of changes.embeddings) {
+      const existing = await tx.embedding.findUnique({
+        where: { id: embedding.id },
+        select: META_SELECT,
+      });
+      const verdict = judge("embeddings", embedding, existing, userId);
+      if (verdict) {
+        rejected.push(verdict);
+        continue;
+      }
+      if (!(await owns.entry(embedding.entryId))) {
+        rejected.push(missingParent("embeddings", embedding.id));
+        continue;
+      }
+      await writeEmbedding(tx, userId, embedding, await nextSeq(tx));
+    }
+
+    for (const log of changes.searchLogs) {
+      const existing = await tx.searchLog.findUnique({ where: { id: log.id }, select: META_SELECT });
+      const verdict = judge("searchLogs", log, existing, userId);
+      if (verdict) {
+        rejected.push(verdict);
+        continue;
+      }
+      if (!(await owns.optionalRepo(log.repoId))) {
+        rejected.push(missingParent("searchLogs", log.id));
+        continue;
+      }
+      await writeSearchLog(tx, userId, log, await nextSeq(tx));
+    }
   });
 
   return rejected;
-}
-
-async function ownsRepo(
-  tx: Prisma.TransactionClient,
-  userId: string,
-  repoId: string,
-): Promise<boolean> {
-  const row = await tx.repo.findUnique({ where: { id: repoId }, select: { userId: true } });
-  return row?.userId === userId;
-}
-
-async function ownsColumn(
-  tx: Prisma.TransactionClient,
-  userId: string,
-  columnId: string,
-): Promise<boolean> {
-  const row = await tx.column.findUnique({ where: { id: columnId }, select: { userId: true } });
-  return row?.userId === userId;
 }
 
 async function writeRepo(
@@ -220,6 +260,78 @@ async function writeCard(
   });
 }
 
+async function writeWikiEntry(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  entry: WikiEntry,
+  seq: number,
+): Promise<void> {
+  const data = {
+    repoId: entry.repoId,
+    title: entry.title,
+    body: entry.body,
+    kind: entry.kind,
+    tags: packList(entry.tags),
+    sourceRef: entry.sourceRef,
+    updatedAt: fromMs(entry.updatedAt),
+    deletedAt: fromMsOrNull(entry.deletedAt),
+    seq,
+  };
+  await tx.wikiEntry.upsert({
+    where: { id: entry.id },
+    create: { id: entry.id, userId, ...data },
+    update: data,
+  });
+}
+
+async function writeEmbedding(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  embedding: Embedding,
+  seq: number,
+): Promise<void> {
+  const data = {
+    entryId: embedding.entryId,
+    model: embedding.model,
+    dim: embedding.dim,
+    vector: embedding.vector,
+    updatedAt: fromMs(embedding.updatedAt),
+    deletedAt: fromMsOrNull(embedding.deletedAt),
+    seq,
+  };
+  await tx.embedding.upsert({
+    where: { id: embedding.id },
+    create: { id: embedding.id, userId, ...data },
+    update: data,
+  });
+}
+
+async function writeSearchLog(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  log: SearchLog,
+  seq: number,
+): Promise<void> {
+  const data = {
+    repoId: log.repoId,
+    query: log.query,
+    scope: log.scope,
+    strategy: log.strategy,
+    model: log.model,
+    resultIds: packList(log.resultIds),
+    usedIds: packList(log.usedIds),
+    tookMs: log.tookMs,
+    updatedAt: fromMs(log.updatedAt),
+    deletedAt: fromMsOrNull(log.deletedAt),
+    seq,
+  };
+  await tx.searchLog.upsert({
+    where: { id: log.id },
+    create: { id: log.id, userId, ...data },
+    update: data,
+  });
+}
+
 export type PullResult = { cursor: number; changes: ChangeSet; hasMore: boolean };
 
 /**
@@ -235,18 +347,24 @@ export async function pullChanges(userId: string, cursor: number): Promise<PullR
   const where = { userId, seq: { gt: cursor } };
   const orderBy = { seq: "asc" } as const;
 
-  const [repos, columns, cards] = await Promise.all([
+  const [repos, columns, cards, wikiEntries, embeddings, searchLogs] = await Promise.all([
     prisma.repo.findMany({ where, orderBy, take }),
     prisma.column.findMany({ where, orderBy, take }),
     prisma.card.findMany({ where, orderBy, take }),
+    prisma.wikiEntry.findMany({ where, orderBy, take }),
+    prisma.embedding.findMany({ where, orderBy, take }),
+    prisma.searchLog.findMany({ where, orderBy, take }),
   ]);
 
-  // 세 종류를 하나의 seq 수열로 합쳐서 앞에서부터 SYNC_PAGE_SIZE 개만 취한다.
+  // 여러 종류를 하나의 seq 수열로 합쳐서 앞에서부터 SYNC_PAGE_SIZE 개만 취한다.
   // 이렇게 해야 "커서 = 돌려준 것들의 최대 seq" 가 종류에 상관없이 성립한다.
   const all = [
-    ...repos.map((r) => ({ seq: r.seq, kind: "repos" as const, row: r })),
-    ...columns.map((c) => ({ seq: c.seq, kind: "columns" as const, row: c })),
-    ...cards.map((c) => ({ seq: c.seq, kind: "cards" as const, row: c })),
+    ...repos.map((row) => ({ seq: row.seq, kind: "repos" as const, row })),
+    ...columns.map((row) => ({ seq: row.seq, kind: "columns" as const, row })),
+    ...cards.map((row) => ({ seq: row.seq, kind: "cards" as const, row })),
+    ...wikiEntries.map((row) => ({ seq: row.seq, kind: "wikiEntries" as const, row })),
+    ...embeddings.map((row) => ({ seq: row.seq, kind: "embeddings" as const, row })),
+    ...searchLogs.map((row) => ({ seq: row.seq, kind: "searchLogs" as const, row })),
   ].sort((a, b) => a.seq - b.seq);
 
   const page = all.slice(0, SYNC_PAGE_SIZE);
@@ -254,38 +372,78 @@ export async function pullChanges(userId: string, cursor: number): Promise<PullR
 
   const changes = emptyChangeSet();
   for (const item of page) {
-    if (item.kind === "repos") {
-      const r = item.row;
-      changes.repos.push({
-        id: r.id,
-        name: r.name,
-        path: r.path,
-        gitRemote: r.gitRemote,
-        updatedAt: toMs(r.updatedAt),
-        deletedAt: toMsOrNull(r.deletedAt),
-      });
-    } else if (item.kind === "columns") {
-      const c = item.row;
-      changes.columns.push({
-        id: c.id,
-        repoId: c.repoId,
-        title: c.title,
-        rank: c.rank,
-        updatedAt: toMs(c.updatedAt),
-        deletedAt: toMsOrNull(c.deletedAt),
-      });
-    } else {
-      const c = item.row;
-      changes.cards.push({
-        id: c.id,
-        repoId: c.repoId,
-        columnId: c.columnId,
-        title: c.title,
-        body: c.body,
-        rank: c.rank,
-        updatedAt: toMs(c.updatedAt),
-        deletedAt: toMsOrNull(c.deletedAt),
-      });
+    switch (item.kind) {
+      case "repos":
+        changes.repos.push({
+          id: item.row.id,
+          name: item.row.name,
+          path: item.row.path,
+          gitRemote: item.row.gitRemote,
+          updatedAt: toMs(item.row.updatedAt),
+          deletedAt: toMsOrNull(item.row.deletedAt),
+        });
+        break;
+      case "columns":
+        changes.columns.push({
+          id: item.row.id,
+          repoId: item.row.repoId,
+          title: item.row.title,
+          rank: item.row.rank,
+          updatedAt: toMs(item.row.updatedAt),
+          deletedAt: toMsOrNull(item.row.deletedAt),
+        });
+        break;
+      case "cards":
+        changes.cards.push({
+          id: item.row.id,
+          repoId: item.row.repoId,
+          columnId: item.row.columnId,
+          title: item.row.title,
+          body: item.row.body,
+          rank: item.row.rank,
+          updatedAt: toMs(item.row.updatedAt),
+          deletedAt: toMsOrNull(item.row.deletedAt),
+        });
+        break;
+      case "wikiEntries":
+        changes.wikiEntries.push({
+          id: item.row.id,
+          repoId: item.row.repoId,
+          title: item.row.title,
+          body: item.row.body,
+          kind: item.row.kind as WikiEntry["kind"],
+          tags: unpackList(item.row.tags),
+          sourceRef: item.row.sourceRef,
+          updatedAt: toMs(item.row.updatedAt),
+          deletedAt: toMsOrNull(item.row.deletedAt),
+        });
+        break;
+      case "embeddings":
+        changes.embeddings.push({
+          id: item.row.id,
+          entryId: item.row.entryId,
+          model: item.row.model,
+          dim: item.row.dim,
+          vector: item.row.vector,
+          updatedAt: toMs(item.row.updatedAt),
+          deletedAt: toMsOrNull(item.row.deletedAt),
+        });
+        break;
+      case "searchLogs":
+        changes.searchLogs.push({
+          id: item.row.id,
+          repoId: item.row.repoId,
+          query: item.row.query,
+          scope: item.row.scope as SearchLog["scope"],
+          strategy: item.row.strategy,
+          model: item.row.model,
+          resultIds: unpackList(item.row.resultIds),
+          usedIds: unpackList(item.row.usedIds),
+          tookMs: item.row.tookMs,
+          updatedAt: toMs(item.row.updatedAt),
+          deletedAt: toMsOrNull(item.row.deletedAt),
+        });
+        break;
     }
   }
 

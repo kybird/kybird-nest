@@ -1,5 +1,13 @@
 import { z } from "zod";
-import { cardSchema, columnSchema, repoSchema } from "./entities.js";
+import {
+  cardSchema,
+  columnSchema,
+  embeddingSchema,
+  ENTITY_KINDS,
+  repoSchema,
+  searchLogSchema,
+  wikiEntrySchema,
+} from "./entities.js";
 
 /**
  * 동기화 프로토콜.
@@ -25,15 +33,25 @@ export const changeSetSchema = z.object({
   repos: z.array(repoSchema).default([]),
   columns: z.array(columnSchema).default([]),
   cards: z.array(cardSchema).default([]),
+  wikiEntries: z.array(wikiEntrySchema).default([]),
+  embeddings: z.array(embeddingSchema).default([]),
+  searchLogs: z.array(searchLogSchema).default([]),
 });
 export type ChangeSet = z.infer<typeof changeSetSchema>;
 
 export function emptyChangeSet(): ChangeSet {
-  return { repos: [], columns: [], cards: [] };
+  return {
+    repos: [],
+    columns: [],
+    cards: [],
+    wikiEntries: [],
+    embeddings: [],
+    searchLogs: [],
+  };
 }
 
 export function changeSetSize(changes: ChangeSet): number {
-  return changes.repos.length + changes.columns.length + changes.cards.length;
+  return ENTITY_KINDS.reduce((sum, kind) => sum + changes[kind].length, 0);
 }
 
 /** 한 번의 pull 로 돌려주는 최대 행 수. 초과분은 `hasMore` 로 알린다. */
@@ -65,7 +83,7 @@ export const rejectionReasonSchema = z.enum([
 export type RejectionReason = z.infer<typeof rejectionReasonSchema>;
 
 export const rejectionSchema = z.object({
-  kind: z.enum(["repos", "columns", "cards"]),
+  kind: z.enum(ENTITY_KINDS),
   id: z.string(),
   reason: rejectionReasonSchema,
   /** 서버가 갖고 있던 값의 updatedAt. `stale` 일 때만 의미가 있다. */

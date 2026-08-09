@@ -20,10 +20,13 @@ model User {
   passwordHash String
   createdAt    DateTime @default(now())
 
-  tokens  Token[]
-  repos   Repo[]
-  columns Column[]
-  cards   Card[]
+  tokens      Token[]
+  repos       Repo[]
+  columns     Column[]
+  cards       Card[]
+  wikiEntries WikiEntry[]
+  embeddings  Embedding[]
+  searchLogs  SearchLog[]
 }
 
 /// 로그인하면 발급되는 API 토큰. 클라이언트는 `~/.kybird/config.json` 에 보관한다.
@@ -63,8 +66,10 @@ model Repo {
   deletedAt DateTime?
   seq       Int
 
-  columns Column[]
-  cards   Card[]
+  columns     Column[]
+  cards       Card[]
+  wikiEntries WikiEntry[]
+  searchLogs  SearchLog[]
 
   @@index([userId, seq])
 }
@@ -110,4 +115,81 @@ model Card {
   @@index([userId, seq])
   @@index([repoId])
   @@index([columnId])
+}
+
+/// wiki 엔트리. repoId 가 null 이면 프로젝트 독립 지식이다.
+///
+/// 서버는 본문을 저장만 한다 — 인덱싱도 검색도 컴파일도 클라이언트가 한다.
+model WikiEntry {
+  id     String  @id
+  userId String
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repoId String?
+  repo   Repo?   @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  title String
+  body  String
+  kind  String
+  /// 문자열 배열을 JSON 으로. 서버는 내용을 해석하지 않는다.
+  tags      String @default("[]")
+  sourceRef String?
+
+  updatedAt DateTime
+  deletedAt DateTime?
+  seq       Int
+
+  embeddings Embedding[]
+
+  @@index([userId, seq])
+  @@index([repoId])
+}
+
+/// 엔트리의 임베딩. 서버 입장에서는 그냥 blob 이다.
+///
+/// model/dim 을 같이 들고 있어야 모델을 바꿔도 옛 벡터를 알아볼 수 있고,
+/// 그래야 평가에서 "무엇을 바꿔서 좋아졌나"를 가릴 수 있다.
+model Embedding {
+  id      String    @id
+  userId  String
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entryId String
+  entry   WikiEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  model  String
+  dim    Int
+  /// Float32Array 를 base64 로.
+  vector String
+
+  updatedAt DateTime
+  deletedAt DateTime?
+  seq       Int
+
+  @@index([userId, seq])
+  @@index([entryId])
+}
+
+/// 검색 한 건의 기록. 평가 정답셋의 씨앗이라 처음부터 남긴다.
+model SearchLog {
+  id     String  @id
+  userId String
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repoId String?
+  repo   Repo?   @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  query    String
+  scope    String
+  strategy String
+  model    String?
+  /// 순위 순서대로의 엔트리 id 배열을 JSON 으로.
+  resultIds String @default("[]")
+  /// 그중 실제로 써먹은 것. 나중에 채워질 수 있다.
+  usedIds String @default("[]")
+  tookMs  Int
+
+  updatedAt DateTime
+  deletedAt DateTime?
+  seq       Int
+
+  @@index([userId, seq])
+  @@index([repoId])
 }

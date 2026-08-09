@@ -20,9 +20,11 @@
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.json && node --test dist/**/*.test.js",
-    "test:e2e": "tsc -p tsconfig.json && node test/core-e2e.mjs"
+    "test:e2e": "tsc -p tsconfig.json && node test/core-e2e.mjs",
+    "test:wiki": "tsc -p tsconfig.json && node test/wiki.mjs"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@kybird/shared": "^0.0.0",
     "better-sqlite3": "^12.4.1"
   },

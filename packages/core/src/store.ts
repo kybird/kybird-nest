@@ -7,9 +7,18 @@ import {
   type Card,
   type ChangeSet,
   type Column,
+  type Embedding,
   type EntityKind,
   type Repo,
+  type SearchLog,
+  type WikiEntry,
 } from "@kybird/shared";
+
+/** 동기화되는 모든 엔티티의 합집합. */
+export type SyncableEntity = Repo | Column | Card | WikiEntry | Embedding | SearchLog;
+
+/** 검색 결과 한 건 — 엔트리 id 와 점수. 본문은 호출부가 따로 꺼낸다. */
+export type ScoredId = { id: string; score: number };
 
 /**
  * 로컬 스토어.
@@ -31,6 +40,18 @@ const TABLE: Record<EntityKind, string> = {
   repos: "repos",
   columns: "board_columns",
   cards: "cards",
+  wikiEntries: "wiki_entries",
+  embeddings: "embeddings",
+  searchLogs: "search_logs",
+};
+
+/**
+ * 프로토콜에서는 문자열 배열인데 SQLite 에는 JSON 문자열로 넣는 필드들.
+ * 스토어 경계에서만 변환하고 그 밖에서는 항상 배열로 다룬다.
+ */
+const LIST_FIELDS: Partial<Record<EntityKind, readonly string[]>> = {
+  wikiEntries: ["tags"],
+  searchLogs: ["resultIds", "usedIds"],
 };
 
 const SCHEMA = `
@@ -85,12 +106,74 @@ CREATE TABLE IF NOT EXISTS conflicts (
   createdAt INTEGER NOT NULL
 );
 
+/*
+ * wiki 엔트리. repoId 가 NULL 이면 프로젝트 독립 지식이다.
+ */
+CREATE TABLE IF NOT EXISTS wiki_entries (
+  id        TEXT PRIMARY KEY,
+  repoId    TEXT,
+  title     TEXT NOT NULL,
+  body      TEXT NOT NULL,
+  kind      TEXT NOT NULL,
+  tags      TEXT NOT NULL DEFAULT '[]',
+  sourceRef TEXT,
+  updatedAt INTEGER NOT NULL,
+  deletedAt INTEGER,
+  dirty     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+  id        TEXT PRIMARY KEY,
+  entryId   TEXT NOT NULL,
+  model     TEXT NOT NULL,
+  dim       INTEGER NOT NULL,
+  vector    TEXT NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  deletedAt INTEGER,
+  dirty     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS search_logs (
+  id        TEXT PRIMARY KEY,
+  repoId    TEXT,
+  query     TEXT NOT NULL,
+  scope     TEXT NOT NULL,
+  strategy  TEXT NOT NULL,
+  model     TEXT,
+  resultIds TEXT NOT NULL DEFAULT '[]',
+  usedIds   TEXT NOT NULL DEFAULT '[]',
+  tookMs    INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  deletedAt INTEGER,
+  dirty     INTEGER NOT NULL DEFAULT 0
+);
+
+/*
+ * 키워드 검색용 전문 인덱스.
+ *
+ * 본문을 중복 저장하지 않으려고 content-less 로 만든다 — 검색은 rowid 만
+ * 돌려주고 실제 행은 wiki_entries 에서 꺼낸다. 인덱스는 파생물이라
+ * 동기화하지 않고 각 머신이 자기 것을 만든다.
+ */
+CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
+  id UNINDEXED,
+  title,
+  body,
+  tags,
+  tokenize = 'unicode61'
+);
+
 CREATE INDEX IF NOT EXISTS idx_columns_repo ON board_columns(repoId);
 CREATE INDEX IF NOT EXISTS idx_cards_repo    ON cards(repoId);
 CREATE INDEX IF NOT EXISTS idx_cards_column  ON cards(columnId);
 CREATE INDEX IF NOT EXISTS idx_repos_dirty   ON repos(dirty);
 CREATE INDEX IF NOT EXISTS idx_columns_dirty ON board_columns(dirty);
 CREATE INDEX IF NOT EXISTS idx_cards_dirty   ON cards(dirty);
+CREATE INDEX IF NOT EXISTS idx_wiki_repo     ON wiki_entries(repoId);
+CREATE INDEX IF NOT EXISTS idx_wiki_dirty    ON wiki_entries(dirty);
+CREATE INDEX IF NOT EXISTS idx_emb_entry     ON embeddings(entryId);
+CREATE INDEX IF NOT EXISTS idx_emb_dirty     ON embeddings(dirty);
+CREATE INDEX IF NOT EXISTS idx_logs_dirty    ON search_logs(dirty);
 `;
 
 type Row = Record<string, unknown>;
@@ -148,6 +231,7 @@ export class Store {
   reset(): void {
     this.transaction(() => {
       for (const table of Object.values(TABLE)) this.db.prepare(`DELETE FROM ${table}`).run();
+      this.db.prepare("DELETE FROM wiki_fts").run();
       this.db.prepare("DELETE FROM conflicts").run();
       this.db.prepare("DELETE FROM meta").run();
     });
@@ -171,7 +255,7 @@ export class Store {
     const row = this.db.prepare(`SELECT * FROM ${TABLE[kind]} WHERE id = ?`).get(id) as
       | Row
       | undefined;
-    return row ? (strip(row) as T) : null;
+    return row ? (fromDb(kind, row) as T) : null;
   }
 
   /** 살아있는(삭제되지 않은) 레포 전부. */
@@ -179,28 +263,28 @@ export class Store {
     const rows = this.db
       .prepare("SELECT * FROM repos WHERE deletedAt IS NULL ORDER BY name")
       .all() as Row[];
-    return rows.map((r) => strip(r) as Repo);
+    return rows.map((r) => fromDb("repos", r) as Repo);
   }
 
   listColumns(repoId: string): Column[] {
     const rows = this.db
       .prepare("SELECT * FROM board_columns WHERE repoId = ? AND deletedAt IS NULL")
       .all(repoId) as Row[];
-    return (rows.map((r) => strip(r) as Column)).sort(byRank);
+    return rows.map((r) => fromDb("columns", r) as Column).sort(byRank);
   }
 
   listCards(columnId: string): Card[] {
     const rows = this.db
       .prepare("SELECT * FROM cards WHERE columnId = ? AND deletedAt IS NULL")
       .all(columnId) as Row[];
-    return (rows.map((r) => strip(r) as Card)).sort(byRank);
+    return rows.map((r) => fromDb("cards", r) as Card).sort(byRank);
   }
 
   listCardsByRepo(repoId: string): Card[] {
     const rows = this.db
       .prepare("SELECT * FROM cards WHERE repoId = ? AND deletedAt IS NULL")
       .all(repoId) as Row[];
-    return (rows.map((r) => strip(r) as Card)).sort(byRank);
+    return rows.map((r) => fromDb("cards", r) as Card).sort(byRank);
   }
 
   // ---- 로컬 쓰기 (dirty 로 표시된다) ----
@@ -242,18 +326,188 @@ export class Store {
       .run(card);
   }
 
+  // ---- wiki ----
+
+  getWikiEntry(id: string): WikiEntry | null {
+    return this.one<WikiEntry>("wikiEntries", id);
+  }
+
+  /**
+   * wiki 엔트리 목록.
+   *
+   * `repoId` 를 주면 그 레포 + 프로젝트 독립 지식을, 안 주면 전부 돌려준다.
+   * cross-project 검색은 후자를 쓴다 — 한 유저의 레포 사이에서만 성립하는데,
+   * 로컬 스토어에는 그 유저 것만 있으므로 별도 필터가 필요 없다.
+   */
+  listWikiEntries(repoId?: string): WikiEntry[] {
+    const rows = (
+      repoId === undefined
+        ? this.db.prepare("SELECT * FROM wiki_entries WHERE deletedAt IS NULL").all()
+        : this.db
+            .prepare(
+              "SELECT * FROM wiki_entries WHERE deletedAt IS NULL AND (repoId = ? OR repoId IS NULL)",
+            )
+            .all(repoId)
+    ) as Row[];
+    return rows.map((r) => fromDb("wikiEntries", r) as WikiEntry);
+  }
+
+  putWikiEntry(entry: WikiEntry): void {
+    this.db
+      .prepare(
+        `INSERT INTO wiki_entries (id, repoId, title, body, kind, tags, sourceRef, updatedAt, deletedAt, dirty)
+         VALUES (@id, @repoId, @title, @body, @kind, @tags, @sourceRef, @updatedAt, @deletedAt, 1)
+         ON CONFLICT(id) DO UPDATE SET
+           repoId = excluded.repoId, title = excluded.title, body = excluded.body,
+           kind = excluded.kind, tags = excluded.tags, sourceRef = excluded.sourceRef,
+           updatedAt = excluded.updatedAt, deletedAt = excluded.deletedAt, dirty = 1`,
+      )
+      .run(toDb("wikiEntries", entry as unknown as Row));
+    this.reindex(entry);
+  }
+
+  getEmbedding(entryId: string, model: string): Embedding | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM embeddings WHERE entryId = ? AND model = ? AND deletedAt IS NULL LIMIT 1",
+      )
+      .get(entryId, model) as Row | undefined;
+    return row ? (fromDb("embeddings", row) as Embedding) : null;
+  }
+
+  putEmbedding(embedding: Embedding): void {
+    this.db
+      .prepare(
+        `INSERT INTO embeddings (id, entryId, model, dim, vector, updatedAt, deletedAt, dirty)
+         VALUES (@id, @entryId, @model, @dim, @vector, @updatedAt, @deletedAt, 1)
+         ON CONFLICT(id) DO UPDATE SET
+           entryId = excluded.entryId, model = excluded.model, dim = excluded.dim,
+           vector = excluded.vector, updatedAt = excluded.updatedAt,
+           deletedAt = excluded.deletedAt, dirty = 1`,
+      )
+      .run(embedding);
+  }
+
+  /** 해당 모델의 벡터를 아직 못 만든 엔트리들. */
+  listEntriesWithoutEmbedding(model: string): WikiEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT e.* FROM wiki_entries e
+         WHERE e.deletedAt IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM embeddings m
+             WHERE m.entryId = e.id AND m.model = ? AND m.deletedAt IS NULL
+               AND m.updatedAt >= e.updatedAt
+           )`,
+      )
+      .all(model) as Row[];
+    return rows.map((r) => fromDb("wikiEntries", r) as WikiEntry);
+  }
+
+  /** 특정 모델의 모든 벡터. 벡터 검색이 메모리로 올려서 쓴다. */
+  listEmbeddings(model: string): Embedding[] {
+    const rows = this.db
+      .prepare("SELECT * FROM embeddings WHERE model = ? AND deletedAt IS NULL")
+      .all(model) as Row[];
+    return rows.map((r) => fromDb("embeddings", r) as Embedding);
+  }
+
+  putSearchLog(log: SearchLog): void {
+    this.db
+      .prepare(
+        `INSERT INTO search_logs (id, repoId, query, scope, strategy, model, resultIds, usedIds, tookMs, updatedAt, deletedAt, dirty)
+         VALUES (@id, @repoId, @query, @scope, @strategy, @model, @resultIds, @usedIds, @tookMs, @updatedAt, @deletedAt, 1)
+         ON CONFLICT(id) DO UPDATE SET
+           repoId = excluded.repoId, query = excluded.query, scope = excluded.scope,
+           strategy = excluded.strategy, model = excluded.model,
+           resultIds = excluded.resultIds, usedIds = excluded.usedIds,
+           tookMs = excluded.tookMs, updatedAt = excluded.updatedAt,
+           deletedAt = excluded.deletedAt, dirty = 1`,
+      )
+      .run(toDb("searchLogs", log as unknown as Row));
+  }
+
+  getSearchLog(id: string): SearchLog | null {
+    return this.one<SearchLog>("searchLogs", id);
+  }
+
+  listSearchLogs(limit = 100): SearchLog[] {
+    const rows = this.db
+      .prepare("SELECT * FROM search_logs WHERE deletedAt IS NULL ORDER BY updatedAt DESC LIMIT ?")
+      .all(limit) as Row[];
+    return rows.map((r) => fromDb("searchLogs", r) as SearchLog);
+  }
+
+  // ---- 키워드 인덱스 ----
+
+  /**
+   * FTS 인덱스를 엔트리 하나에 맞춰 갱신한다.
+   *
+   * fts5 에는 UPSERT 가 없으니 지우고 다시 넣는다. 삭제된(툼스톤) 엔트리는
+   * 넣지 않는다 — 검색 결과에 뜨면 안 되니까.
+   */
+  private reindex(entry: WikiEntry): void {
+    this.db.prepare("DELETE FROM wiki_fts WHERE id = ?").run(entry.id);
+    if (entry.deletedAt !== null) return;
+    this.db
+      .prepare("INSERT INTO wiki_fts (id, title, body, tags) VALUES (?, ?, ?, ?)")
+      .run(entry.id, entry.title, entry.body, entry.tags.join(" "));
+  }
+
+  /** 인덱스를 통째로 다시 만든다. 인덱스는 파생물이라 언제든 버려도 된다. */
+  rebuildIndex(): number {
+    return this.transaction(() => {
+      this.db.prepare("DELETE FROM wiki_fts").run();
+      const entries = this.listWikiEntries();
+      for (const entry of entries) this.reindex(entry);
+      return entries.length;
+    });
+  }
+
+  /**
+   * 키워드 검색. FTS5 의 bm25 순위를 그대로 쓴다.
+   *
+   * bm25() 는 **작을수록 좋은** 값이라 부호를 뒤집어 점수로 만든다.
+   * 제목이 본문보다 중요하므로 가중치를 준다.
+   */
+  searchKeyword(query: string, options: { repoId?: string; limit?: number } = {}): ScoredId[] {
+    const match = toMatchQuery(query);
+    if (match === null) return [];
+
+    const limit = options.limit ?? 50;
+    // bm25 의 가중치는 fts5 컬럼 순서(id, title, body, tags)에 맞춘다.
+    // id 는 UNINDEXED 라 0, 제목이 본문보다 무겁다.
+    const select = `SELECT f.id AS id, -bm25(wiki_fts, 0.0, 10.0, 1.0, 3.0) AS score
+       FROM wiki_fts f
+       JOIN wiki_entries e ON e.id = f.id
+       WHERE wiki_fts MATCH ? AND e.deletedAt IS NULL`;
+    const ordering = " ORDER BY score DESC LIMIT ?";
+
+    const rows =
+      options.repoId === undefined
+        ? this.db.prepare(select + ordering).all(match, limit)
+        : this.db
+            .prepare(`${select} AND (e.repoId = ? OR e.repoId IS NULL)${ordering}`)
+            .all(match, options.repoId, limit);
+
+    return rows as ScoredId[];
+  }
+
   // ---- 동기화용 ----
 
   /** 아직 서버에 못 올린 로컬 변경분. */
   pending(): ChangeSet {
     const dirty = <T>(kind: EntityKind): T[] =>
       (this.db.prepare(`SELECT * FROM ${TABLE[kind]} WHERE dirty = 1`).all() as Row[]).map(
-        (r) => strip(r) as T,
+        (r) => fromDb(kind, r) as T,
       );
     return {
       repos: dirty<Repo>("repos"),
       columns: dirty<Column>("columns"),
       cards: dirty<Card>("cards"),
+      wikiEntries: dirty<WikiEntry>("wikiEntries"),
+      embeddings: dirty<Embedding>("embeddings"),
+      searchLogs: dirty<SearchLog>("searchLogs"),
     };
   }
 
@@ -276,14 +530,14 @@ export class Store {
    * 로컬이 dirty 이고 LWW 에서 이기면 덮어쓰지 않는다 — 다음 push 때
    * 올라갈 값이라 여기서 뭉개면 사용자 편집이 사라진다.
    */
-  applyRemote(kind: EntityKind, incoming: Repo | Column | Card): "applied" | "kept-local" {
-    const existing = this.one<Repo | Column | Card>(kind, incoming.id);
+  applyRemote(kind: EntityKind, incoming: SyncableEntity): "applied" | "kept-local" {
+    const existing = this.one<SyncableEntity>(kind, incoming.id);
     if (existing) {
       const localDirty = this.isDirty(kind, incoming.id);
       if (localDirty && !incomingWins(incoming, existing)) return "kept-local";
     }
 
-    const write = { ...incoming } as Row;
+    const write = toDb(kind, incoming as unknown as Row);
     const columns = Object.keys(write);
     const placeholders = columns.map((c) => `@${c}`).join(", ");
     const updates = columns.filter((c) => c !== "id").map((c) => `${c} = excluded.${c}`);
@@ -294,6 +548,8 @@ export class Store {
          ON CONFLICT(id) DO UPDATE SET ${updates.join(", ")}, dirty = 0`,
       )
       .run(write);
+
+    if (kind === "wikiEntries") this.reindex(incoming as WikiEntry);
     return "applied";
   }
 
@@ -325,8 +581,54 @@ export class Store {
   }
 }
 
-/** 로컬 전용 컬럼(`dirty`)을 떼어내 프로토콜 모양으로 되돌린다. */
-function strip(row: Row): Row {
+/**
+ * DB 행을 프로토콜 모양으로 되돌린다.
+ * 로컬 전용 컬럼(`dirty`)을 떼고, JSON 으로 넣어둔 배열 필드를 되살린다.
+ */
+function fromDb(kind: EntityKind, row: Row): Row {
   const { dirty: _dirty, ...rest } = row;
+  for (const field of LIST_FIELDS[kind] ?? []) {
+    rest[field] = parseList(rest[field]);
+  }
   return rest;
+}
+
+/** 프로토콜 모양을 DB 에 넣을 수 있는 값으로. 배열은 JSON 문자열이 된다. */
+function toDb(kind: EntityKind, entity: Row): Row {
+  const out: Row = { ...entity };
+  for (const field of LIST_FIELDS[kind] ?? []) {
+    out[field] = JSON.stringify(out[field] ?? []);
+  }
+  return out;
+}
+
+/**
+ * 사용자 질의를 FTS5 MATCH 문법으로 옮긴다.
+ *
+ * 날것으로 넘기면 `AND`, `"`, `*`, `(` 같은 게 FTS5 연산자로 해석돼서
+ * 엉뚱한 결과가 나오거나 아예 구문 오류가 난다. 토큰만 뽑아 각각 인용하고
+ * OR 로 잇는다 — 몇 개가 맞았는지는 bm25 가 순위로 반영한다.
+ *
+ * 접두 검색(`*`)을 붙이는 이유는 한국어 때문이다. unicode61 토크나이저는
+ * 공백으로만 자르므로 "싱크를" 이 통째로 한 토큰이 되는데, 접두 검색이면
+ * "싱크" 로도 걸린다.
+ */
+function toMatchQuery(query: string): string | null {
+  const tokens = query
+    .split(/[^\p{L}\p{N}_]+/u)
+    .filter((t) => t.length > 0)
+    .slice(0, 32);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"*`).join(" OR ");
+}
+
+function parseList(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw as string[];
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
 }

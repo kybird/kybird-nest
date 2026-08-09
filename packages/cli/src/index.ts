@@ -23,7 +23,9 @@ import {
   writeLink,
   type Config,
 } from "@kybird/core";
+import { changeSetSize } from "@kybird/shared";
 import { ask, askSecret } from "./prompt.js";
+import { wikiCommand, WIKI_HELP } from "./wiki-commands.js";
 
 const HELP = `knest — kybird-nest 명령줄 도구
 
@@ -37,6 +39,13 @@ const HELP = `knest — kybird-nest 명령줄 도구
   knest link [--name 이름]        현재 디렉토리를 레포에 연결한다
   knest sync                      서버와 맞춘다
   knest status                    아직 못 올린 변경과 충돌을 보여준다
+
+wiki
+  knest wiki add <제목>           지식을 넣는다 (본문은 표준입력)
+  knest wiki search <질의>        하이브리드 검색
+  knest wiki embed                벡터를 만든다
+  knest wiki index                색인을 뽑는다
+  knest wiki help                 자세히
 
 칸반
   knest board                     현재 레포의 보드
@@ -86,6 +95,8 @@ async function main(argv: string[]): Promise<number> {
       return removeCommand(rest);
     case "conflicts":
       return conflicts(rest);
+    case "wiki":
+      return wikiTopLevel(rest);
     default:
       process.stderr.write(`알 수 없는 명령: ${command}\n\n${HELP}`);
       return 1;
@@ -199,8 +210,7 @@ async function runSync(): Promise<number> {
 function status(): number {
   const store = openStore();
   try {
-    const pending = store.pending();
-    const total = pending.repos.length + pending.columns.length + pending.cards.length;
+    const total = changeSetSize(store.pending());
     const conflicts = store.listConflicts();
     const linked = findLink(process.cwd());
 
@@ -352,6 +362,25 @@ function conflicts(argv: string[]): number {
   } finally {
     store.close();
   }
+}
+
+// ---- wiki ----
+
+/**
+ * wiki 명령은 전부 레포 맥락이 필요하고, 끝나면 조용히 동기화한다.
+ * 읽기 전용 명령까지 동기화하는 게 낭비 같지만, 검색은 로그를 남기므로
+ * 실은 쓰기다 — 그 로그가 평가 정답셋의 씨앗이라 흘리면 안 된다.
+ */
+async function wikiTopLevel(argv: string[]): Promise<number> {
+  if (argv[0] === undefined || argv[0] === "help") {
+    process.stdout.write(WIKI_HELP);
+    return 0;
+  }
+  return withRepo(async (store, repoId) => {
+    const code = await wikiCommand(argv, { store, repoId });
+    await trySync(store);
+    return code;
+  });
 }
 
 // ---- 거들기 ----

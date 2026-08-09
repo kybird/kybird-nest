@@ -1,4 +1,12 @@
-import { byRank, newId, now, rankBetween, type Card, type Column } from "@kybird/shared";
+import {
+  byRank,
+  emptyChangeSet,
+  newId,
+  now,
+  rankBetween,
+  type Card,
+  type Column,
+} from "@kybird/shared";
 import { prisma } from "./prisma";
 import { applyChanges } from "./sync";
 
@@ -85,7 +93,7 @@ export async function addCard(
     updatedAt: now(),
     deletedAt: null,
   };
-  await applyChanges(userId, { repos: [], columns: [], cards: [card] });
+  await applyChanges(userId, { ...emptyChangeSet(), cards: [card] });
 }
 
 /**
@@ -128,15 +136,14 @@ export async function moveCard(
     updatedAt: now(),
     deletedAt: null,
   };
-  await applyChanges(userId, { repos: [], columns: [], cards: [moved] });
+  await applyChanges(userId, { ...emptyChangeSet(), cards: [moved] });
 }
 
 export async function editCardTitle(userId: string, cardId: string, title: string): Promise<void> {
   const card = await prisma.card.findFirst({ where: { id: cardId, userId, deletedAt: null } });
   if (!card) throw new Error("카드를 찾을 수 없다");
   await applyChanges(userId, {
-    repos: [],
-    columns: [],
+    ...emptyChangeSet(),
     cards: [
       {
         id: card.id,
@@ -158,8 +165,7 @@ export async function deleteCard(userId: string, cardId: string): Promise<void> 
   if (!card) return;
   const timestamp = now();
   await applyChanges(userId, {
-    repos: [],
-    columns: [],
+    ...emptyChangeSet(),
     cards: [
       {
         id: card.id,

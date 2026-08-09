@@ -21,6 +21,8 @@ import {
   sync,
   register,
   OfflineError,
+  inject,
+  search as wikiSearch,
 } from "../dist/index.js";
 
 const BASE = process.env.BASE ?? "http://localhost:3000";
@@ -159,6 +161,46 @@ ok(
 const shape = (s) =>
   board(s, repo.id).columns.map((c) => `${c.column.title}:${c.cards.map((x) => x.title).join("|")}`).join(" / ");
 ok(shape(A) === shape(B), `두 머신의 보드가 동일\n    A: ${shape(A)}\n    B: ${shape(B)}`);
+
+// ---- wiki 엔트리도 같은 경로로 동기화된다 ----
+const w1 = inject(A, {
+  repoId: repo.id,
+  title: "분수 랭크",
+  body: "정수 순서는 오프라인에서 반드시 충돌한다.",
+  kind: "gotcha",
+  tags: ["kanban", "sync"],
+  sourceRef: "commit abc123",
+});
+// 프로젝트 독립 지식 — repoId 가 null 이어도 부모 누락으로 거절되면 안 된다.
+const w2 = inject(A, {
+  repoId: null,
+  title: "전역 지식",
+  body: "특정 프로젝트에 매이지 않는 지식.",
+  kind: "concept",
+  tags: [],
+});
+await sync(A, opts);
+await sync(B, opts);
+
+ok(B.getWikiEntry(w1.id)?.title === "분수 랭크", `wiki 엔트리가 B 로 전파 (${B.getWikiEntry(w1.id)?.title})`);
+ok(
+  JSON.stringify(B.getWikiEntry(w1.id)?.tags) === JSON.stringify(["kanban", "sync"]),
+  `태그 배열이 왕복해도 보존됨 (${JSON.stringify(B.getWikiEntry(w1.id)?.tags)})`,
+);
+ok(B.getWikiEntry(w1.id)?.sourceRef === "commit abc123", "sourceRef 보존");
+ok(B.getWikiEntry(w2.id)?.repoId === null, "repoId 가 null 인 전역 지식도 그대로 전파된다");
+
+// 받아온 엔트리는 B 의 검색 인덱스에도 들어가 있어야 한다
+const found = await wikiSearch(B, "충돌", { repoId: repo.id });
+ok(found.hits[0]?.entry.id === w1.id, `동기화로 받은 엔트리가 B 에서 검색된다 (${found.hits[0]?.entry.title})`);
+
+// 검색 로그도 동기화 대상이다 — 평가 정답셋이 한 머신에만 남으면 안 된다
+await sync(B, opts);
+await sync(A, opts);
+ok(
+  A.listSearchLogs().some((l) => l.query === "충돌"),
+  "B 에서 한 검색의 로그가 A 로도 온다",
+);
 
 // ---- 반복 동기화는 아무것도 바꾸지 않아야 한다 ----
 const r3 = await sync(A, opts);
