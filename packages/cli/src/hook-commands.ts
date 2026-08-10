@@ -24,13 +24,15 @@ export const HOOK_HELP = `knest hook — git 연동
 
 export const BACKFILL_HELP = `knest backfill — 밀린 커밋을 지식으로
 
-  knest backfill [--limit N]        소화할 커밋의 재료를 꺼내 보여준다
+  knest backfill [--limit N]        소화할 커밋의 재료를 꺼내 보여준다 (기본 3개)
+  knest backfill --all              밀린 것 전부를 한 번에 꺼내 보여준다
+                                    (이 솔루션을 기존 레포에 처음 붙일 때 —
+                                     찔끔찔끔 반복 호출하지 말고 세션 한 번에 몰아서 처리해라)
   knest backfill seed [--limit N] [--since <ref>]
                                     과거 커밋을 큐에 채워넣는다
   knest backfill done <큐id>...     처리했다고 표시한다
 
-실제로 글을 쓰는 건 에이전트다 (MCP 의 wiki_pending / wiki_log).
-여기서는 재료만 준비한다.
+실제로 글을 쓰는 건 에이전트다 (knest wiki add / raw). 여기서는 재료만 준비한다.
 `;
 
 /** 푸시할 때 거슬러 훑을 커밋 수. 훅이 오래 걸리면 안 되므로 적당히 끊는다. */
@@ -195,13 +197,24 @@ export function backfillCommand(argv: string[], store: Store, repoId: string): n
 function showMaterial(argv: string[], store: Store, repoId: string): number {
   const { values } = parseArgs({
     args: argv,
-    options: { limit: { type: "string" } },
+    options: { limit: { type: "string" }, all: { type: "boolean" } },
     allowPositionals: false,
   });
 
+  // 기본값(3개씩)은 "평소 작업 중에 조금씩" 시나리오를 위한 것이다.
+  // --all 은 다른 시나리오다 — 이 솔루션을 기존 레포에 처음 붙일 때
+  // 쌓여있는 이력을 한 세션에 몰아서 처리하는 것. 그럴 땐 3개씩 CLI를
+  // 반복 호출하는 게 아니라 한 번에 전부 텍스트로 받아서, 에이전트가
+  // 그 세션 안에서 필요한 만큼 wiki add/raw 를 부르는 게 맞다.
+  const limit = values.all
+    ? store.countPendingIngest(repoId)
+    : values.limit
+      ? Number(values.limit)
+      : 3;
+
   const items = collectBackfill(store, {
     repoId,
-    limit: values.limit ? Number(values.limit) : 3,
+    limit,
   });
 
   if (items.length === 0) {
