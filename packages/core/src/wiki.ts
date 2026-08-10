@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   newId,
   now,
@@ -242,6 +244,76 @@ export function compileIndex(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * 엔트리들을 폴더에 `.md` 파일로 내보낸다. `compileIndex` 의 파일 버전 —
+ * 단일 index.md 대신 엔트리별 노트를 만들어서 옵시디언 vault 로 열 수 있다.
+ *
+ * DB 가 진실원(SSOT)이고 이 파일들은 생성물이다. 위키가 바뀌면 다시 돌려서
+ * 갱신한다. 커밋하지 않는다(seed 문서의 index.md 지옥 재현 방지).
+ *
+ * `[[제목]]` 링크는 변환하지 않는다 — 옵시디언이 같은 vault 안에서
+ * 제목=파일명 으로 자동 연결한다. 사용자가 본문에 `[[...]]` 로 쓰면 된다.
+ */
+export function exportWikiEntries(
+  store: Store,
+  options: { repoId?: string; outDir: string },
+): { written: number } {
+  const entries = store
+    .listWikiEntries(options.repoId)
+    .sort((a, b) => a.title.localeCompare(b.title, "ko"));
+
+  mkdirSync(options.outDir, { recursive: true });
+
+  // 파일명 충돌 감지 — 같은 safeTitle 이면 id 로 보정.
+  const usedNames = new Set<string>();
+
+  let written = 0;
+  for (const entry of entries) {
+    const base = safeFileName(entry.title);
+    let name = base;
+    if (usedNames.has(name)) {
+      name = `${base}-${entry.id.slice(0, 6)}`;
+    }
+    usedNames.add(name);
+
+    const tags = entry.tags.length > 0 ? `\ntags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]` : "";
+    const source = entry.sourceRef ? `\nsourceRef: "${entry.sourceRef}"` : "";
+
+    const body = `---
+id: ${entry.id}
+title: "${entry.title.replace(/"/g, '\\"')}"
+kind: ${entry.kind}${tags}${source}
+generated: true
+---
+
+# ${entry.title}
+
+${entry.body.trim()}
+
+---
+_id: \`${entry.id}\`_
+`;
+
+    writeFileSync(join(options.outDir, `${name}.md`), body, "utf8");
+    written++;
+  }
+
+  // index.md 도 같은 폴더에.
+  const indexMd = compileIndex(store, { repoId: options.repoId });
+  writeFileSync(join(options.outDir, "index.md"), indexMd, "utf8");
+
+  return { written };
+}
+
+/**
+ * 옵시디언/파일시스템 금지문자를 빼서 제목을 파일명으로 쓸 수 있게 한다.
+ * 빈 값이면 'untitled' 로 떨어진다.
+ */
+function safeFileName(title: string): string {
+  const cleaned = title.replace(/[/\\:*?"<>|]/g, "").replace(/\s+/g, " ").trim();
+  return cleaned.length > 0 ? cleaned.slice(0, 120) : "untitled";
 }
 
 /** 본문의 첫 의미있는 줄. 색인에 한 줄 요약으로 붙인다. */

@@ -6,6 +6,7 @@ import {
   compileIndex,
   DEFAULT_EMBEDDING_MODEL,
   ensureEmbeddings,
+  exportWikiEntries,
   hybridRetriever,
   inject,
   keywordRetriever,
@@ -39,7 +40,8 @@ export const WIKI_HELP = `knest wiki — 프로젝트 지식
   knest wiki list [--all]
   knest wiki show <엔트리>
   knest wiki rm <엔트리>
-  knest wiki index [--out 경로] [--all]      색인을 만든다 (생성물, 커밋 금지)
+  knest wiki index [--out 폴더] [--all]     위키를 폴더에 내보낸다 (옵시디언 vault)
+      --out 없으면 index.md 만 stdout 으로. --out 폴더면 index.md + 엔트리별 .md.
   knest wiki embed                            아직 없는 벡터를 만든다
   knest wiki logs [--limit N]                 검색 기록
 `;
@@ -304,18 +306,22 @@ function index(argv: string[], { store, repoId }: Ctx): number {
 
   const scope = values.all ? undefined : repoId;
   const repo = store.getRepo(repoId);
-  const markdown = compileIndex(store, {
-    repoId: scope,
-    title: values.all ? "wiki 색인 (전체)" : `${repo?.name ?? "wiki"} 색인`,
-  });
 
+  // --out 이 없으면 index.md 내용만 stdout 으로 (파이프/스크립트 호환).
   if (!values.out) {
+    const markdown = compileIndex(store, {
+      repoId: scope,
+      title: values.all ? "wiki 색인 (전체)" : `${repo?.name ?? "wiki"} 색인`,
+    });
     process.stdout.write(markdown);
     return 0;
   }
-  const path = resolve(values.out);
-  writeFileSync(path, markdown, "utf8");
-  process.stdout.write(`${path}\n`);
+
+  // --out 이 있으면 폴더로 취급 — index.md + 엔트리별 .md 를 옵시디언 vault 로.
+  const outDir = resolve(values.out);
+  const { written } = exportWikiEntries(store, { repoId: scope, outDir });
+  process.stdout.write(`${outDir} 에 ${written}개 엔트리 + index.md 를 썼다.\n`);
+  process.stdout.write("옵시디언으로 이 폴더를 vault 로 열어라. [[제목]] 링크가 작동한다.\n");
   process.stdout.write("생성물이다. .gitignore 에 넣어라.\n");
   return 0;
 }
