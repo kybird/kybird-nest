@@ -20,10 +20,12 @@ import {
   register,
   requireToken,
   saveConfig,
+  setupSkill,
   storePath,
   sync,
   writeLink,
   type Config,
+  type SkillSetupResult,
 } from "@kybird/core";
 import { changeSetSize } from "@kybird/shared";
 import { ask, askSecret } from "./prompt.js";
@@ -224,6 +226,7 @@ async function link(argv: string[]): Promise<number> {
     const repo = createRepo(store, { name, path: cwd, gitRemote: detectGitRemote(cwd) });
     const path = writeLink(cwd, { repoId: repo.id });
     process.stdout.write(`"${name}" 레포를 만들고 연결했다.\n  ${path}\n`);
+    reportSkillSetup(setupSkill(cwd));
 
     // 바로 올려둔다. 실패해도 로컬에는 남으므로 다음 sync 에 따라간다.
     await trySync(store);
@@ -324,6 +327,7 @@ async function repoJoin(argv: string[]): Promise<number> {
     }
 
     process.stdout.write(`"${result.repo.name}" 레포에 합류했다. knest sync 로 나머지를 받아라.\n`);
+    reportSkillSetup(setupSkill(process.cwd()));
     await trySync(store);
     return 0;
   } catch (error) {
@@ -586,6 +590,14 @@ async function backfillTopLevel(argv: string[]): Promise<number> {
 }
 
 // ---- 거들기 ----
+
+function reportSkillSetup(result: SkillSetupResult): void {
+  if (result.status === "written") {
+    process.stdout.write(`스킬 파일도 심었다: ${result.path}\n`);
+  }
+  // foreign 이면 조용히 넘어간다 — 사용자가 이미 손댄 파일이라 매번
+  // "안 건드렸다"고 알릴 것까진 없다.
+}
 
 function openStore(): Store {
   return new Store(storePath());

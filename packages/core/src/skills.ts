@@ -1,0 +1,104 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * `knest link`(또는 `repo join`) 시점에 `.claude/skills/knest/SKILL.md`를
+ * 자동 생성한다.
+ *
+ * 이건 brief.md 4단계(스킬 상속: 부모 고정, 파생본 개인 것)가 아니다 —
+ * 그건 서버가 스킬을 보유하고 LLM이 매개해서 리베이스하는 훨씬 큰 작업이고
+ * 아직 안 만들었다. 여기서 하는 건 그보다 훨씬 작다: **MCP를 안 쓰기로
+ * 하면서 사라진 "에이전트가 이 도구의 존재를 어떻게 아는가"의 빈자리를
+ * 메우는 것.** MCP는 툴 목록에 자동으로 뜨지만 CLI는 AGENTS.md를 읽어야만
+ * 안다 — 그 문서를 매번 손으로 안 써도 되게, link 시점에 자동으로 심는다.
+ */
+
+const MARKER = "<!-- kybird-nest:generated -->";
+
+function skillContent(): string {
+  return `---
+name: knest
+description: kybird-nest 지식·칸반 백엔드 사용. 작업 시작 전 검색, 끝나면 기록.
+---
+
+${MARKER}
+<!-- knest link 가 자동 생성한 파일이다. 직접 고쳐도 되지만, 그러면 이
+     마커가 없어져서 다음 link 때 덮어쓰지 않는다(사용자 수정 존중). -->
+
+# knest — 이 프로젝트에 연결된 지식·칸반 백엔드
+
+이 레포는 kybird-nest 에 연결돼있다. 서버가 프로젝트 지식(wiki)과 칸반
+보드를 저장하고, 여러 사람·기기가 공유한다.
+
+## 작업 시작 전 — 먼저 검색해라
+
+\`\`\`
+knest wiki search "<찾고 싶은 것>"
+\`\`\`
+
+이미 누가(과거의 나 자신 포함) 알아낸 게 있는지 먼저 확인하면 같은 문제를
+다시 풀지 않는다. 결과에 로그 id 가 같이 나오는데, 실제로 참고한 항목이
+있으면 \`knest wiki used <로그id> <엔트리id>...\`로 표시해라 — 검색 품질
+평가에 쓰인다.
+
+## 작업 끝나면 — 알게 된 걸 남겨라
+
+정리된 지식(결론 + 근거를 같이):
+\`\`\`
+knest wiki add "제목" --body "본문" [--kind concept|pattern|gotcha|decision|reference]
+\`\`\`
+
+다듬을 시간이 없는 원본 메모(나중에 다시 떠올라 압축될 수 있다):
+\`\`\`
+knest wiki raw "메모"
+\`\`\`
+
+## 커밋할 때마다
+
+git hook 이 설치돼있으면, 커밋 직후에 "기록할 게 있으면 지금 남겨라"는
+안내가 뜬다. 그 순간이 맥락이 살아있어서 기록하기 가장 좋을 때다 — 무시하지
+말고 실제로 확인해라.
+
+## 칸반
+
+\`\`\`
+knest board                                     현재 보드 보기
+knest add "<제목>" [--column 컬럼] [--body 본문]  카드 추가
+knest mv <카드> <컬럼>                           카드 옮기기
+\`\`\`
+
+## 밀린 것 처리
+
+\`\`\`
+knest backfill                       아직 안 본 커밋들의 재료를 보여준다
+\`\`\`
+
+자세한 전체 명령은 \`knest help\`, \`knest wiki help\`.
+`;
+}
+
+export type SkillSetupResult =
+  | { status: "written"; path: string }
+  | { status: "skipped"; path: string; reason: "foreign" };
+
+/**
+ * `.claude/skills/knest/SKILL.md` 를 쓴다.
+ *
+ * 이미 있는데 우리 마커가 없으면(사용자가 직접 만들었거나 고친 것)
+ * 건드리지 않는다 — git hook 설치가 남의 훅을 안 덮어쓰는 것과 같은 이유.
+ */
+export function setupSkill(repoPath: string): SkillSetupResult {
+  const dir = join(repoPath, ".claude", "skills", "knest");
+  const path = join(dir, "SKILL.md");
+
+  if (existsSync(path)) {
+    const current = readFileSync(path, "utf8");
+    if (!current.includes(MARKER)) {
+      return { status: "skipped", path, reason: "foreign" };
+    }
+  }
+
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path, skillContent(), "utf8");
+  return { status: "written", path };
+}
