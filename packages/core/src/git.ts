@@ -169,10 +169,20 @@ const MARKER = "# kybird-nest";
 function hookBody(nodePath: string, cliPath: string, kind: string): string {
   // 큐에 넣기만 하고 즉시 끝낸다. 실패해도 exit 0 이다 —
   // 지식 기록이 커밋이나 푸시를 막는 건 본말전도다.
+  //
+  // **stdout 은 버리지 않는다.** 훅이 뭘 출력하면 git 이 그걸 자기
+  // stderr 로 흘려보내서 `git commit` 을 실행한 쪽(사람이든 에이전트든)에게
+  // 전달한다 — 이 시스템에서 유일하게 보장된 접점이다(실측 확인:
+  // `git commit 2>/dev/null` 이면 사라지고 `1>/dev/null` 이면 남는다).
+  // 예전엔 여기를 >/dev/null 로 막아놔서, 큐에 쌓기만 하고 아무도 그
+  // 사실을 모르는 상태가 됐다.
+  //
+  // 여기 남은 2>/dev/null 은 **knest 자신의 stderr** 를 막는 것이다 —
+  // 훅이 실패해도 커밋을 방해하지 않기 위해서지, 안내를 막는 게 아니다.
   return [
     "#!/bin/sh",
     MARKER,
-    `"${nodePath}" "${cliPath}" hook enqueue --kind ${kind} >/dev/null 2>&1 || true`,
+    `"${nodePath}" "${cliPath}" hook enqueue --kind ${kind} 2>/dev/null || true`,
     "exit 0",
     "",
   ].join("\n");

@@ -132,6 +132,7 @@ function enqueue(argv: string[], store: Store): number {
     if (!ref) return 0;
 
     store.enqueueIngest({ repoId: linked.link.repoId, repoPath: cwd, kind, ref });
+    nudge(store, linked.link.repoId, ref);
   } catch (error) {
     // 조용히 삼킨다 — 커밋을 막지 않는 게 우선이다.
     // 다만 이 침묵은 진짜 버그도 가린다. 훅이 안 먹는 것 같으면 이걸 켜라.
@@ -140,6 +141,42 @@ function enqueue(argv: string[], store: Store): number {
     }
   }
   return 0;
+}
+
+/**
+ * 커밋 직후에 뜨는 한 줄. **이 시스템에서 유일하게 보장된 접점이다.**
+ *
+ * MCP 툴 리마인더든 AGENTS.md 지침이든, 에이전트가 "부르기로 선택"해야
+ * 뜬다 — 안 부르면 영영 안 뜬다. 반면 커밋은 반드시 한다. 그리고 훅이
+ * 출력한 건 git 이 자기 stderr 로 흘려보내서 `git commit` 을 실행한 쪽의
+ * 화면(에이전트라면 그 컨텍스트)에 들어간다. 선택의 여지가 없는 자리다.
+ *
+ * 하네스 훅(Claude Code settings.json 등)이 더 강력하지만 도구마다 제각각
+ * 이라 이식성이 없다 — MCP 가 툴은 표준화했어도 세션 생명주기 훅은
+ * 표준이 없다. git 은 모든 에이전트가 공통으로 쓰는 유일한 표준이라,
+ * 도구 중립적으로 보장을 얻을 수 있는 자리가 여기뿐이다.
+ *
+ * 그리고 지금이 기록하기 가장 좋은 순간이기도 하다 — 방금 한 작업의
+ * 맥락이 아직 살아있다. backfill 은 나중에 diff 만 보고 복원하는 거라
+ * 늘 이보다 못하다.
+ *
+ * **LLM 은 부르지 않는다.** 로컬 카운트 한 번이라 커밋이 느려지지 않는다.
+ * 훅에서 LLM 을 부르면 커밋이 느려지고, 느려지면 --no-verify 로 꺼버린다
+ * (brief.md 2장). 큐에 넣는 것마저 안 되는 것보다는 안내만 하는 게 낫다.
+ */
+function nudge(store: Store, repoId: string, ref: string): void {
+  if (process.env["KNEST_QUIET"]) return;
+
+  const pending = store.countPendingIngest(repoId);
+  const short = ref.slice(0, 7);
+
+  process.stdout.write(
+    `\n[knest] 이번 작업에서 알게 된 게 있으면 지금 남겨라 — 나중에 diff 만 보고 복원하는 것보다 낫다.\n` +
+      `        knest wiki add "제목" --source ${short}      (정리된 지식)\n` +
+      `        knest wiki raw "메모"                        (다듬지 않은 원본)\n` +
+      (pending > 1 ? `        소화 안 된 커밋 ${pending}건 — knest backfill\n` : "") +
+      `        (이 안내를 끄려면 KNEST_QUIET=1)\n\n`,
+  );
 }
 
 // ---- backfill ----
