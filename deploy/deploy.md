@@ -99,6 +99,11 @@ server {
     listen [::]:8443 ssl;
     server_name doall.kybird.dynu.net;
 
+    # 8443은 SSL 전용인데 http:// 로 들어오면 nginx가 497을 띄운다.
+    # 평문 리스너를 따로 열 순 없다(SSL 포트는 동시에 평문을 못 받는다) —
+    # 497을 잡아 https로 301.
+    error_page 497 =301 https://$host:$server_port$request_uri;
+
     client_max_body_size 20M;
 
     ssl_certificate /etc/letsencrypt/live/doall.kybird.dynu.net/fullchain.pem;
@@ -113,6 +118,16 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Next.js Server Actions 검증을 위한 포워드 헤더. 빠지면
+        # x-forwarded-host(포트 없음) 와 origin(포트 있음) 이 불일치해서
+        # Server Actions 요청이 "Invalid Server Actions request" 로 거부된다
+        # (로그인 POST /login 가 500). 헤더만으로는 Next.js 16 이 host 만
+        # 비교해서 부족할 수 있다 — 그 경우 next.config.ts 의
+        # experimental.serverActions.allowedOrigins 에 "host:8443" 을 명시해야
+        # 한다 (이 레포 next.config.ts 참조).
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
     }
 }
 ```

@@ -11,6 +11,18 @@ const nextConfig: NextConfig = {
   output: "standalone",
   // pathname 을 그대로 쓰면 Windows 에서 "/D:/..." 가 되어 깨진다.
   outputFileTracingRoot: fileURLToPath(new URL("../../", import.meta.url)),
+
+  // 리버스 프록시(nginx) 뒤에서 비표준 포트(8443)로 서비스할 때,
+  // Server Actions 의 origin 검증을 통과시킨다. nginx 가 X-Forwarded-Port
+  // 를 줘도 Next.js 16 은 host 만 비교해서 "doall.kybird.dynu.net"(포트
+  // 없음) != origin "doall.kybird.dynu.net:8443"(포트 있음) 으로 불일치
+  // 판정한다 → "Invalid Server Actions request" → 로그인 POST 가 500.
+  // allowedOrigins 에 명시하면 이 origin 을 신뢰한다.
+  experimental: {
+    serverActions: {
+      allowedOrigins: ["doall.kybird.dynu.net:8443"],
+    },
+  },
 };
 
 export default nextConfig;
