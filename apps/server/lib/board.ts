@@ -52,6 +52,7 @@ export async function loadBoard(userId: string, repoId: string): Promise<Board |
     repoId: c.repoId,
     title: c.title,
     rank: c.rank,
+    isDone: c.isDone,
     updatedAt: toMs(c.updatedAt),
     deletedAt: toMsOrNull(c.deletedAt),
   });
@@ -62,6 +63,8 @@ export async function loadBoard(userId: string, repoId: string): Promise<Board |
     title: c.title,
     body: c.body,
     rank: c.rank,
+    completedAt: toMsOrNull(c.completedAt),
+    regressCount: c.regressCount,
     updatedAt: toMs(c.updatedAt),
     deletedAt: toMsOrNull(c.deletedAt),
   });
@@ -90,6 +93,11 @@ export async function addCard(
     select: { rank: true },
   });
   const last = siblings.map((s) => s.rank).sort().at(-1) ?? null;
+  const column = await prisma.column.findFirst({
+    where: { id: columnId, deletedAt: null },
+    select: { isDone: true },
+  });
+  const ts = now();
 
   const card: Card = {
     id: newId(),
@@ -98,7 +106,9 @@ export async function addCard(
     title,
     body: "",
     rank: rankBetween(last, null),
-    updatedAt: now(),
+    completedAt: column?.isDone ? ts : null,
+    regressCount: 0,
+    updatedAt: ts,
     deletedAt: null,
   };
   await applyChanges(userId, { ...emptyChangeSet(), cards: [card] });
@@ -119,7 +129,7 @@ export async function moveCard(
 
   const column = await prisma.column.findFirst({
     where: { id: toColumnId, deletedAt: null },
-    select: { id: true, repoId: true },
+    select: { id: true, repoId: true, isDone: true },
   });
   if (!column) throw new Error("컬럼을 찾을 수 없다");
 
@@ -134,6 +144,20 @@ export async function moveCard(
   const prev = at > 0 ? siblings[at - 1]!.rank : null;
   const next = at < siblings.length ? siblings[at]!.rank : null;
 
+  // 완료 진입/이탈 감지. regressCount 로 반복 회귀를 잡는다.
+  // card.completedAt 은 Prisma 의 Date — 프로토콜(ms)로 정규화해서 작업한다.
+  let completedAt: number | null = card.completedAt ? toMs(card.completedAt) : null;
+  let regressCount = card.regressCount;
+  const sameColumn = card.columnId === toColumnId;
+  if (!sameColumn) {
+    if (column.isDone && completedAt === null) {
+      completedAt = now();
+    } else if (!column.isDone && completedAt !== null) {
+      regressCount += 1;
+      completedAt = null;
+    }
+  }
+
   const moved: Card = {
     id: card.id,
     repoId: column.repoId,
@@ -141,13 +165,19 @@ export async function moveCard(
     title: card.title,
     body: card.body,
     rank: rankBetween(prev, next),
+    completedAt,
+    regressCount,
     updatedAt: now(),
     deletedAt: null,
   };
   await applyChanges(userId, { ...emptyChangeSet(), cards: [moved] });
 }
 
-export async function editCardTitle(userId: string, cardId: string, title: string): Promise<void> {
+export async function editCard(
+  userId: string,
+  cardId: string,
+  patch: { title?: string; body?: string },
+): Promise<void> {
   const card = await prisma.card.findFirst({ where: { id: cardId, deletedAt: null } });
   if (!card) throw new Error("카드를 찾을 수 없다");
   await applyChanges(userId, {
@@ -157,9 +187,11 @@ export async function editCardTitle(userId: string, cardId: string, title: strin
         id: card.id,
         repoId: card.repoId,
         columnId: card.columnId,
-        title,
-        body: card.body,
+        title: patch.title ?? card.title,
+        body: patch.body ?? card.body,
         rank: card.rank,
+        completedAt: card.completedAt ? toMs(card.completedAt) : null,
+        regressCount: card.regressCount,
         updatedAt: now(),
         deletedAt: null,
       },
@@ -182,8 +214,107 @@ export async function deleteCard(userId: string, cardId: string): Promise<void> 
         title: card.title,
         body: card.body,
         rank: card.rank,
+        completedAt: card.completedAt ? toMs(card.completedAt) : null,
+        regressCount: card.regressCount,
         updatedAt: timestamp,
         deletedAt: timestamp,
+      },
+    ],
+  });
+}
+
+/**
+ * 삭제된 카드를 되살린다. 툼스톤(deletedAt)을 지우기만 한다 — 데이터는
+ * 그대로 남아있었다. updatedAt 이 최신이므로 다른 머신에도 복구가 퍼진다.
+ */
+export async function restoreCard(userId: string, cardId: string): Promise<void> {
+  const card = await prisma.card.findFirst({ where: { id: cardId } });
+  if (!card || card.deletedAt === null) return;
+  await applyChanges(userId, {
+    ...emptyChangeSet(),
+    cards: [
+      {
+        id: card.id,
+        repoId: card.repoId,
+        columnId: card.columnId,
+        title: card.title,
+        body: card.body,
+        rank: card.rank,
+        completedAt: card.completedAt ? toMs(card.completedAt) : null,
+        regressCount: card.regressCount,
+        updatedAt: now(),
+        deletedAt: null,
+      },
+    ],
+  });
+}
+
+/** 삭제된 카드(툼스톤) 목록 — 보관함 뷰용. 최근 삭제순. */
+export async function listDeletedCards(
+  userId: string,
+  repoId: string,
+): Promise<Card[]> {
+  const membership = await prisma.repoMember.findUnique({
+    where: { repoId_userId: { repoId, userId } },
+    select: { id: true },
+  });
+  if (!membership) return [];
+
+  const cards = await prisma.card.findMany({
+    where: { repoId, deletedAt: { not: null } },
+    orderBy: { updatedAt: "desc" },
+  });
+  return cards.map((c) => ({
+    id: c.id,
+    repoId: c.repoId,
+    columnId: c.columnId,
+    title: c.title,
+    body: c.body,
+    rank: c.rank,
+    completedAt: toMsOrNull(c.completedAt),
+    regressCount: c.regressCount,
+    updatedAt: toMs(c.updatedAt),
+    deletedAt: toMsOrNull(c.deletedAt),
+  }));
+}
+
+export async function addColumn(userId: string, repoId: string, title: string): Promise<void> {
+  const siblings = await prisma.column.findMany({
+    where: { repoId, deletedAt: null },
+    select: { rank: true },
+  });
+  const last = siblings.map((s) => s.rank).sort().at(-1) ?? null;
+
+  const column: Column = {
+    id: newId(),
+    repoId,
+    title,
+    rank: rankBetween(last, null),
+    isDone: false,
+    updatedAt: now(),
+    deletedAt: null,
+  };
+  await applyChanges(userId, { ...emptyChangeSet(), columns: [column] });
+}
+
+export async function renameColumn(
+  userId: string,
+  columnId: string,
+  title: string,
+): Promise<void> {
+  const column = await prisma.column.findFirst({ where: { id: columnId, deletedAt: null } });
+  if (!column) throw new Error("컬럼을 찾을 수 없다");
+  await applyChanges(userId, {
+    ...emptyChangeSet(),
+    columns: [
+      {
+        id: column.id,
+        repoId: column.repoId,
+        title,
+        rank: column.rank,
+        isDone: column.isDone,
+        updatedAt: now(),
+        deletedAt: null,
       },
     ],
   });

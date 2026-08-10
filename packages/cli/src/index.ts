@@ -19,6 +19,7 @@ import {
   moveCard,
   register,
   requireToken,
+  restoreCard,
   saveConfig,
   setupSkill,
   storePath,
@@ -66,8 +67,10 @@ wiki
   knest board                     현재 레포의 보드
   knest add <제목> [--column 컬럼] [--body 본문]
   knest mv <카드> <컬럼> [위치]
-  knest edit <카드> <새 제목>
+  knest edit <카드> [새 제목] [--body 본문]
   knest rm <카드>
+  knest trash                     보관함 (삭제된 카드 목록)
+  knest restore <카드>            보관함에서 카드를 되살린다
   knest conflicts [--clear]       동기화에서 밀려난 로컬 값들
 
 카드와 컬럼은 id 앞부분만 써도 되고, 컬럼은 이름으로도 지정할 수 있다.
@@ -111,6 +114,10 @@ async function main(argv: string[]): Promise<number> {
       return editCommand(rest);
     case "rm":
       return removeCommand(rest);
+    case "trash":
+      return trashCommand();
+    case "restore":
+      return restoreCommand(rest);
     case "conflicts":
       return conflicts(rest);
     case "wiki":
@@ -387,7 +394,16 @@ function showBoard(): Promise<number> {
         continue;
       }
       for (const card of cards) {
-        process.stdout.write(`    ${short(card.id)}  ${card.title}\n`);
+        const regress = card.regressCount > 0 ? `  ↺${card.regressCount}` : "";
+        process.stdout.write(`    ${short(card.id)}  ${card.title}${regress}\n`);
+        const body = card.body?.trim();
+        if (body) {
+          // 첫 두 줄만 보여주고, 더 길면 말줄임.
+          const lines = body.split("\n").slice(0, 2);
+          for (const line of lines) {
+            process.stdout.write(`        ${line}\n`);
+          }
+        }
       }
     }
     process.stdout.write("\n");
@@ -449,17 +465,26 @@ async function moveCommand(argv: string[]): Promise<number> {
 }
 
 async function editCommand(argv: string[]): Promise<number> {
-  const [cardRef, ...titleParts] = argv;
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: { body: { type: "string" } },
+    allowPositionals: true,
+  });
+  const [cardRef, ...titleParts] = positionals;
   const title = titleParts.join(" ").trim();
-  if (!cardRef || !title) {
-    process.stderr.write("사용법: knest edit <카드> <새 제목>\n");
+  if (!cardRef || (!title && values.body === undefined)) {
+    process.stderr.write("사용법: knest edit <카드> [새 제목] [--body 본문]\n");
     return 1;
   }
   return withRepo(async (store, repoId) => {
     const card = findCard(store, repoId, cardRef);
     if (!card) return 1;
-    const updated = editCard(store, card.id, { title });
+    const patch: { title?: string; body?: string } = {};
+    if (title) patch.title = title;
+    if (values.body !== undefined) patch.body = values.body;
+    const updated = editCard(store, card.id, patch);
     process.stdout.write(`${short(updated.id)}  ${updated.title}\n`);
+    if (updated.body) process.stdout.write(`  ${updated.body}\n`);
     await trySync(store);
     return 0;
   });
@@ -475,7 +500,44 @@ async function removeCommand(argv: string[]): Promise<number> {
     const card = findCard(store, repoId, cardRef);
     if (!card) return 1;
     deleteCard(store, card.id);
-    process.stdout.write(`지웠다: ${card.title}\n`);
+    process.stdout.write(`지웠다: ${card.title}  (knest trash 로 보관함, knest restore 로 복구)\n`);
+    await trySync(store);
+    return 0;
+  });
+}
+
+function trashCommand(): Promise<number> {
+  return withRepo((store, repoId) => {
+    const cards = store.listDeletedCardsByRepo(repoId);
+    if (cards.length === 0) {
+      process.stdout.write("보관함이 비었다.\n");
+      return 0;
+    }
+    process.stdout.write(`\n  보관함 (${cards.length})\n`);
+    for (const card of cards) {
+      process.stdout.write(`    ${short(card.id)}  ${card.title}\n`);
+    }
+    process.stdout.write("\n  되살리려면: knest restore <id>\n\n");
+    return 0;
+  });
+}
+
+async function restoreCommand(argv: string[]): Promise<number> {
+  const [cardRef] = argv;
+  if (!cardRef) {
+    process.stderr.write("사용법: knest restore <카드>\n");
+    return 1;
+  }
+  return withRepo(async (store, repoId) => {
+    // 보관함 카드는 findCard(활성 카드 검색)에 안 잡힌다 — 풀 스캔.
+    const deleted = store.listDeletedCardsByRepo(repoId);
+    const match = deleted.find((c) => c.id.startsWith(cardRef));
+    if (!match) {
+      process.stderr.write(`보관함에서 카드를 찾을 수 없다: ${cardRef}\n`);
+      return 1;
+    }
+    const restored = restoreCard(store, match.id);
+    process.stdout.write(`되살렸다: ${restored.title}\n`);
     await trySync(store);
     return 0;
   });

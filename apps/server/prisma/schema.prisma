@@ -118,6 +118,9 @@ model Column {
   title String
   /// 분수 랭크. 정수 순서는 오프라인에서 반드시 충돌한다 — brief.md 4장 참고.
   rank  String
+  /// 완료를 뜻하는 컬럼인가. 카드가 여기 들어오면 completedAt 이 찍히고,
+  /// 빠져나가면 regressCount 가 올라간다(반복 회귀 감지).
+  isDone Boolean @default(false)
 
   updatedAt DateTime
   deletedAt DateTime?
@@ -141,6 +144,11 @@ model Card {
   title String
   body  String @default("")
   rank  String
+  /// 완료 컬럼에 마지막으로 들어간 시각. 완료가 아니면 null.
+  completedAt DateTime?
+  /// 완료에서 빠져나간 횟수. 반복 회귀 감지용 — 0보다 크면 한 번 이상
+  /// 끝냈던 일이 다시 열린 것이다.
+  regressCount Int @default(0)
 
   updatedAt DateTime
   deletedAt DateTime?

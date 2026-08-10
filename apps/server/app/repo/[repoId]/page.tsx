@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { currentUser } from "@/lib/session";
-import { loadBoard } from "@/lib/board";
+import { listDeletedCards, loadBoard } from "@/lib/board";
 import { BoardClient } from "./board-client";
 
 export default async function RepoPage({ params }: { params: Promise<{ repoId: string }> }) {
@@ -12,6 +12,8 @@ export default async function RepoPage({ params }: { params: Promise<{ repoId: s
 
   const board = await loadBoard(user.id, repoId);
   if (!board) notFound();
+
+  const deletedCards = await listDeletedCards(user.id, repoId);
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
@@ -28,7 +30,11 @@ export default async function RepoPage({ params }: { params: Promise<{ repoId: s
         ) : null}
       </header>
 
-      <BoardClient repoId={board.repo.id} columns={board.columns} />
+      <BoardClient
+        repoId={board.repo.id}
+        columns={board.columns}
+        deletedCards={deletedCards}
+      />
     </main>
   );
 }

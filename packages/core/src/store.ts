@@ -75,21 +75,24 @@ CREATE TABLE IF NOT EXISTS board_columns (
   repoId    TEXT NOT NULL,
   title     TEXT NOT NULL,
   rank      TEXT NOT NULL,
+  isDone    INTEGER NOT NULL DEFAULT 0,
   updatedAt INTEGER NOT NULL,
   deletedAt INTEGER,
   dirty     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS cards (
-  id        TEXT PRIMARY KEY,
-  repoId    TEXT NOT NULL,
-  columnId  TEXT NOT NULL,
-  title     TEXT NOT NULL,
-  body      TEXT NOT NULL DEFAULT '',
-  rank      TEXT NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  deletedAt INTEGER,
-  dirty     INTEGER NOT NULL DEFAULT 0
+  id           TEXT PRIMARY KEY,
+  repoId       TEXT NOT NULL,
+  columnId     TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  body         TEXT NOT NULL DEFAULT '',
+  rank         TEXT NOT NULL,
+  completedAt  INTEGER,
+  regressCount INTEGER NOT NULL DEFAULT 0,
+  updatedAt    INTEGER NOT NULL,
+  deletedAt    INTEGER,
+  dirty        INTEGER NOT NULL DEFAULT 0
 );
 
 /*
@@ -200,7 +203,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_dirty    ON search_logs(dirty);
 `;
 
 /** 로컬 스토어 스키마 버전. 모양을 바꾸면 올리고 `migrate` 에 처리를 넣는다. */
-const STORE_VERSION = 2;
+const STORE_VERSION = 3;
 
 type Row = Record<string, unknown>;
 
@@ -233,26 +236,48 @@ export class Store {
 
     // 스키마가 바뀌어도 CREATE TABLE IF NOT EXISTS 는 기존 테이블을 손대지 않는다.
     // 그래서 낡은 모양이 조용히 살아남는다 — 버전을 보고 먼저 정리한다.
+    // SCHEMA 로 테이블을 보장한 뒤 migrate() 로 낡은 테이블에 컬럼을 추가한다
+    // (ALTER TABLE 은 테이블이 있어야 한다). 단 DROP 으로 스키마를 갈아엎는
+    // 마이그레이션은 SCHEMA 전에 해야 CREATE TABLE 이 빈 테이블을 다시 만든다.
     this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    this.migrate();
+    this.migratePreSchema();
     this.db.exec(SCHEMA);
+    this.migratePostSchema();
     this.setMeta("storeVersion", String(STORE_VERSION));
   }
 
   /**
-   * 로컬 스토어 마이그레이션.
-   *
-   * 여긴 서버가 아니라 작업 사본이라 과감해도 된다 — 동기화되는 것은 서버에서
-   * 다시 받아오면 되고, 큐는 git 이력에서 다시 채우면 된다(`backfill seed`).
+   * SCHEMA 실행 전 마이그레이션 — DROP 으로 스키마를 갈아엎는 것.
+   * CREATE TABLE 이 빈 테이블을 다시 만들게 하려면 여기서 해야 한다.
    */
-  private migrate(): void {
+  private migratePreSchema(): void {
     const current = Number(this.getMeta("storeVersion") ?? "1");
-    if (current >= STORE_VERSION) return;
-
     if (current < 2) {
       // 유니크 키가 (repoId, kind, ref) 였다 — 같은 커밋이 두 번 큐에 올랐다.
       this.db.exec("DROP TABLE IF EXISTS ingest_queue");
     }
+  }
+
+  /**
+   * SCHEMA 실행 후 마이그레이션 — 기존 테이블에 컬럼을 추가하는 것.
+   * CREATE TABLE IF NOT EXISTS 는 컬럼이 빠진 낡은 테이블을 안 고치므로,
+   * ALTER TABLE 로 직접 갚아준다.
+   */
+  private migratePostSchema(): void {
+    const current = Number(this.getMeta("storeVersion") ?? "1");
+    if (current < 3) {
+      // 완료 추적 필드. pragma_table_info 로 있는지 먼저 본다(중복 ALTER 방지).
+      this.addColumnIfMissing("board_columns", "isDone", "INTEGER NOT NULL DEFAULT 0");
+      this.addColumnIfMissing("cards", "completedAt", "INTEGER");
+      this.addColumnIfMissing("cards", "regressCount", "INTEGER NOT NULL DEFAULT 0");
+    }
+  }
+
+  /** 컬럼이 없으면 ALTER TABLE ADD COLUMN. 이미 있으면 조용히 넘어간다. */
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (cols.some((c) => c.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   private getMeta(key: string): string | null {
@@ -364,6 +389,16 @@ export class Store {
     return rows.map((r) => fromDb("cards", r) as Card).sort(byRank);
   }
 
+  /** 삭제된 카드(툼스톤) — 보관함 뷰용. 최근 삭제순. */
+  listDeletedCardsByRepo(repoId: string): Card[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM cards WHERE repoId = ? AND deletedAt IS NOT NULL ORDER BY updatedAt DESC",
+      )
+      .all(repoId) as Row[];
+    return rows.map((r) => fromDb("cards", r) as Card);
+  }
+
   // ---- 로컬 쓰기 (dirty 로 표시된다) ----
 
   putRepo(repo: Repo): void {
@@ -381,23 +416,25 @@ export class Store {
   putColumn(column: Column): void {
     this.db
       .prepare(
-        `INSERT INTO board_columns (id, repoId, title, rank, updatedAt, deletedAt, dirty)
-         VALUES (@id, @repoId, @title, @rank, @updatedAt, @deletedAt, 1)
+        `INSERT INTO board_columns (id, repoId, title, rank, isDone, updatedAt, deletedAt, dirty)
+         VALUES (@id, @repoId, @title, @rank, @isDone, @updatedAt, @deletedAt, 1)
          ON CONFLICT(id) DO UPDATE SET
            repoId = excluded.repoId, title = excluded.title, rank = excluded.rank,
-           updatedAt = excluded.updatedAt, deletedAt = excluded.deletedAt, dirty = 1`,
+           isDone = excluded.isDone, updatedAt = excluded.updatedAt,
+           deletedAt = excluded.deletedAt, dirty = 1`,
       )
-      .run(column);
+      .run({ ...column, isDone: column.isDone ? 1 : 0 });
   }
 
   putCard(card: Card): void {
     this.db
       .prepare(
-        `INSERT INTO cards (id, repoId, columnId, title, body, rank, updatedAt, deletedAt, dirty)
-         VALUES (@id, @repoId, @columnId, @title, @body, @rank, @updatedAt, @deletedAt, 1)
+        `INSERT INTO cards (id, repoId, columnId, title, body, rank, completedAt, regressCount, updatedAt, deletedAt, dirty)
+         VALUES (@id, @repoId, @columnId, @title, @body, @rank, @completedAt, @regressCount, @updatedAt, @deletedAt, 1)
          ON CONFLICT(id) DO UPDATE SET
            repoId = excluded.repoId, columnId = excluded.columnId, title = excluded.title,
-           body = excluded.body, rank = excluded.rank, updatedAt = excluded.updatedAt,
+           body = excluded.body, rank = excluded.rank, completedAt = excluded.completedAt,
+           regressCount = excluded.regressCount, updatedAt = excluded.updatedAt,
            deletedAt = excluded.deletedAt, dirty = 1`,
       )
       .run(card);
@@ -738,6 +775,10 @@ function fromDb(kind: EntityKind, row: Row): Row {
   for (const field of LIST_FIELDS[kind] ?? []) {
     rest[field] = parseList(rest[field]);
   }
+  // SQLite 는 boolean 을 0/1 INTEGER 로 저장한다. 프로토콜은 boolean.
+  if (kind === "columns" && "isDone" in rest) {
+    rest["isDone"] = Boolean(rest["isDone"]);
+  }
   return rest;
 }
 
@@ -746,6 +787,10 @@ function toDb(kind: EntityKind, entity: Row): Row {
   const out: Row = { ...entity };
   for (const field of LIST_FIELDS[kind] ?? []) {
     out[field] = JSON.stringify(out[field] ?? []);
+  }
+  // SQLite 는 boolean 을 0/1 INTEGER 로 저장한다.
+  if (kind === "columns" && "isDone" in out) {
+    out["isDone"] = out["isDone"] ? 1 : 0;
   }
   return out;
 }

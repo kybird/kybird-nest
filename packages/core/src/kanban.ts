@@ -18,12 +18,19 @@ export function createRepo(
   };
   store.transaction(() => {
     store.putRepo(repo);
-    for (const title of DEFAULT_COLUMNS) createColumn(store, repo.id, title);
+    for (const title of DEFAULT_COLUMNS) {
+      createColumn(store, repo.id, title, { isDone: title === "완료" });
+    }
   });
   return repo;
 }
 
-export function createColumn(store: Store, repoId: string, title: string): Column {
+export function createColumn(
+  store: Store,
+  repoId: string,
+  title: string,
+  opts?: { isDone?: boolean },
+): Column {
   const existing = store.listColumns(repoId);
   const last = existing.length > 0 ? existing[existing.length - 1]!.rank : null;
   const column: Column = {
@@ -31,6 +38,7 @@ export function createColumn(store: Store, repoId: string, title: string): Colum
     repoId,
     title,
     rank: rankBetween(last, null),
+    isDone: opts?.isDone ?? false,
     updatedAt: now(),
     deletedAt: null,
   };
@@ -44,6 +52,7 @@ export function createCard(
 ): Card {
   const existing = store.listCards(input.columnId);
   const last = existing.length > 0 ? existing[existing.length - 1]!.rank : null;
+  const targetColumn = store.getColumn(input.columnId);
   const card: Card = {
     id: newId(),
     repoId: input.repoId,
@@ -51,6 +60,8 @@ export function createCard(
     title: input.title,
     body: input.body ?? "",
     rank: rankBetween(last, null),
+    completedAt: targetColumn?.isDone ? now() : null,
+    regressCount: 0,
     updatedAt: now(),
     deletedAt: null,
   };
@@ -99,11 +110,27 @@ export function moveCard(
   const prev = at > 0 ? siblings[at - 1]!.rank : null;
   const next = at < siblings.length ? siblings[at]!.rank : null;
 
+  // 완료 진입/이탈 감지. regressCount 로 반복 회귀를 잡는다.
+  let { completedAt, regressCount } = card;
+  const sameColumn = card.columnId === toColumnId;
+  if (!sameColumn) {
+    if (column.isDone && completedAt === null) {
+      // 완료가 아닌 곳에서 완료로 — 완료 시각 찍기.
+      completedAt = now();
+    } else if (!column.isDone && completedAt !== null) {
+      // 완료에서 완료가 아닌 곳으로 — 회귀. 카운트 올리고 completedAt 리셋.
+      regressCount += 1;
+      completedAt = null;
+    }
+  }
+
   const updated: Card = {
     ...card,
     columnId: toColumnId,
     repoId: column.repoId,
     rank: rankBetween(prev, next),
+    completedAt,
+    regressCount,
     updatedAt: now(),
   };
   store.putCard(updated);
@@ -116,6 +143,15 @@ export function deleteCard(store: Store, cardId: string): Card {
   if (!card) throw new Error(`카드를 찾을 수 없다: ${cardId}`);
   const timestamp = now();
   const updated: Card = { ...card, updatedAt: timestamp, deletedAt: timestamp };
+  store.putCard(updated);
+  return updated;
+}
+
+/** 삭제된 카드를 되살린다. 툼스톤(deletedAt)을 지운다. */
+export function restoreCard(store: Store, cardId: string): Card {
+  const card = store.getCard(cardId);
+  if (!card) throw new Error(`카드를 찾을 수 없다: ${cardId}`);
+  const updated: Card = { ...card, updatedAt: now(), deletedAt: null };
   store.putCard(updated);
   return updated;
 }

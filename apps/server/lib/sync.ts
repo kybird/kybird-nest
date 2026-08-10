@@ -281,6 +281,7 @@ async function writeColumn(
     repoId: column.repoId,
     title: column.title,
     rank: column.rank,
+    isDone: column.isDone,
     updatedAt: fromMs(column.updatedAt),
     deletedAt: fromMsOrNull(column.deletedAt),
     seq,
@@ -304,6 +305,8 @@ async function writeCard(
     title: card.title,
     body: card.body,
     rank: card.rank,
+    completedAt: fromMsOrNull(card.completedAt),
+    regressCount: card.regressCount,
     updatedAt: fromMs(card.updatedAt),
     deletedAt: fromMsOrNull(card.deletedAt),
     seq,
@@ -463,6 +466,7 @@ export async function pullChanges(userId: string, cursor: number): Promise<PullR
           repoId: item.row.repoId,
           title: item.row.title,
           rank: item.row.rank,
+          isDone: item.row.isDone,
           updatedAt: toMs(item.row.updatedAt),
           deletedAt: toMsOrNull(item.row.deletedAt),
         });
@@ -475,6 +479,8 @@ export async function pullChanges(userId: string, cursor: number): Promise<PullR
           title: item.row.title,
           body: item.row.body,
           rank: item.row.rank,
+          completedAt: toMsOrNull(item.row.completedAt),
+          regressCount: item.row.regressCount,
           updatedAt: toMs(item.row.updatedAt),
           deletedAt: toMsOrNull(item.row.deletedAt),
         });

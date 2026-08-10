@@ -31,6 +31,8 @@ export const columnSchema = syncMetaSchema.extend({
   repoId: z.string().min(1).max(64),
   title: z.string().min(1).max(200),
   rank: rankSchema,
+  /** 완료를 뜻하는 컬럼인가. 기본 "완료" 컬럼만 true. */
+  isDone: z.boolean(),
 });
 export type Column = z.infer<typeof columnSchema>;
 
@@ -41,6 +43,10 @@ export const cardSchema = syncMetaSchema.extend({
   title: z.string().min(1).max(500),
   body: z.string().max(100_000),
   rank: rankSchema,
+  /** 마지막으로 완료 컬럼에 들어간 시각(ms). 미완료면 null. */
+  completedAt: z.number().int().nonnegative().nullable(),
+  /** 완료에서 빠져나간 횟수. 반복 회귀 감지. */
+  regressCount: z.number().int().nonnegative(),
 });
 export type Card = z.infer<typeof cardSchema>;
 

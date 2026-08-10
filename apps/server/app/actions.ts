@@ -117,7 +117,21 @@ export async function editCardAction(
   const trimmed = title.trim();
   if (!trimmed) return;
   const user = await requireUser();
-  await boardOps.editCardTitle(user.id, cardId, trimmed);
+  await boardOps.editCard(user.id, cardId, { title: trimmed });
+  revalidatePath(`/repo/${repoId}`);
+}
+
+/** 카드 상세 모달에서 제목+본문을 같이 저장한다. */
+export async function editCardDetailsAction(
+  repoId: string,
+  cardId: string,
+  title: string,
+  body: string,
+): Promise<void> {
+  const trimmedTitle = title.trim();
+  if (!trimmedTitle) return;
+  const user = await requireUser();
+  await boardOps.editCard(user.id, cardId, { title: trimmedTitle, body });
   revalidatePath(`/repo/${repoId}`);
 }
 
@@ -126,4 +140,34 @@ export async function deleteCardAction(repoId: string, cardId: string): Promise<
   await boardOps.deleteCard(user.id, cardId);
   revalidatePath(`/repo/${repoId}`);
   revalidatePath("/");
+}
+
+/** 삭제된 카드(툼스톤)를 되살린다. 보관함에서 복구 버튼이 부른다. */
+export async function restoreCardAction(repoId: string, cardId: string): Promise<void> {
+  const user = await requireUser();
+  await boardOps.restoreCard(user.id, cardId);
+  revalidatePath(`/repo/${repoId}`);
+  revalidatePath("/");
+}
+
+/** 새 컬럼을 맨 뒤에 추가한다. */
+export async function addColumnAction(repoId: string, title: string): Promise<void> {
+  const trimmed = title.trim();
+  if (!trimmed) return;
+  const user = await requireUser();
+  await boardOps.addColumn(user.id, repoId, trimmed);
+  revalidatePath(`/repo/${repoId}`);
+}
+
+/** 컬럼 제목을 바꾼다. 헤더를 더블클릭해서 편집한다. */
+export async function renameColumnAction(
+  repoId: string,
+  columnId: string,
+  title: string,
+): Promise<void> {
+  const trimmed = title.trim();
+  if (!trimmed) return;
+  const user = await requireUser();
+  await boardOps.renameColumn(user.id, columnId, trimmed);
+  revalidatePath(`/repo/${repoId}`);
 }
