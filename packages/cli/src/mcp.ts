@@ -6,6 +6,7 @@ import {
   OfflineError,
   Store,
   board,
+  captureRaw,
   collectBackfill,
   compileIndex,
   createCard,
@@ -160,6 +161,46 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       });
       const note = await trySync(ctx.store);
       return text(`기록했다: ${entry.title} (${entry.id})${note ? `\n${note}` : ""}`);
+    },
+  );
+
+  server.registerTool(
+    "wiki_raw",
+    {
+      title: "raw 메모 남기기",
+      description:
+        "다듬지 않은 원본을 가볍게 남긴다 — wiki_log 보다 훨씬 저비용이다. 판단이 " +
+        "덜 선 것, 정리는 나중에 하고 싶은 것을 형식 없이 던져두면 된다. git 레포면 " +
+        "곧바로 커밋돼서(사용자별 파일이라 다른 사람과 충돌 없음) 팀에 공유되고, " +
+        "나중에 wiki_pending 으로 다시 떠올라 wiki_log 로 압축될 수 있다.",
+      inputSchema: { note: z.string().describe("raw 메모. 형식 자유, 다듬지 않아도 된다") },
+    },
+    async ({ note }) => {
+      const config = loadConfig();
+      const author = config.email ?? "anonymous";
+      const result = captureRaw(ctx.repoPath, author, note);
+
+      if (!result.committed) {
+        return text(
+          `이 기기에만 남겼다 (커밋 안 됨 — git 레포가 아니거나 실패): ${result.filePath}`,
+        );
+      }
+
+      // 훅이 안 깔려있어도 큐에 바로 넣는다 — enqueueIngest 는 (repoId, ref)
+      // 유니크라 훅이 나중에 같은 커밋을 또 넣어도 안전하다.
+      if (result.commitSha) {
+        ctx.store.enqueueIngest({
+          repoId: ctx.repoId,
+          repoPath: ctx.repoPath,
+          kind: "commit",
+          ref: result.commitSha,
+        });
+      }
+
+      return text(
+        `raw 메모를 커밋했다 (${result.commitSha?.slice(0, 7) ?? "?"}). ` +
+          "나중에 wiki_pending 으로 다시 떠오른다.",
+      );
     },
   );
 

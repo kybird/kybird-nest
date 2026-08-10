@@ -500,7 +500,13 @@ async function wikiTopLevel(argv: string[]): Promise<number> {
     return 0;
   }
   return withRepo(async (store, repoId) => {
-    const code = await wikiCommand(argv, { store, repoId });
+    const config = loadConfig();
+    const code = await wikiCommand(argv, {
+      store,
+      repoId,
+      repoPath: process.cwd(),
+      author: config.email ?? "anonymous",
+    });
     await trySync(store);
     return code;
   });

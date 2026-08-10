@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  captureRaw,
   compileIndex,
   DEFAULT_EMBEDDING_MODEL,
   ensureEmbeddings,
@@ -23,6 +24,11 @@ export const WIKI_HELP = `knest wiki — 프로젝트 지식
       본문을 안 주면 표준입력에서 읽는다.
       종류: concept | pattern | gotcha | decision | reference
 
+  knest wiki raw [메모]
+      다듬지 않은 원본을 가볍게 남긴다. 메모를 안 주면 표준입력에서 읽는다.
+      git 레포면 사용자별 파일(doc/raw/<나>/<날짜>.md)에 바로 커밋된다 —
+      나중에 knest backfill 로 다시 떠올라 정식 엔트리로 압축될 수 있다.
+
   knest wiki search <질의> [--all] [--keyword|--semantic] [--limit N]
       기본은 하이브리드(키워드+벡터). --all 이면 내 모든 레포를 뒤진다.
 
@@ -34,13 +40,15 @@ export const WIKI_HELP = `knest wiki — 프로젝트 지식
   knest wiki logs [--limit N]                 검색 기록
 `;
 
-type Ctx = { store: Store; repoId: string };
+type Ctx = { store: Store; repoId: string; repoPath: string; author: string };
 
 export async function wikiCommand(argv: string[], ctx: Ctx): Promise<number> {
   const [sub, ...rest] = argv;
   switch (sub) {
     case "add":
       return add(rest, ctx);
+    case "raw":
+      return raw(rest, ctx);
     case "search":
       return searchCmd(rest, ctx);
     case "list":
@@ -98,6 +106,35 @@ async function add(argv: string[], { store, repoId }: Ctx): Promise<number> {
   });
 
   process.stdout.write(`${short(entry.id)}  ${entry.title}  [${entry.kind}]\n`);
+  return 0;
+}
+
+async function raw(argv: string[], ctx: Ctx): Promise<number> {
+  const note = (argv.join(" ").trim() || (await readStdin())).trim();
+  if (!note) {
+    process.stderr.write("메모가 비었다: knest wiki raw <메모> (또는 표준입력)\n");
+    return 1;
+  }
+
+  const result = captureRaw(ctx.repoPath, ctx.author, note);
+  if (!result.committed) {
+    process.stdout.write(
+      `이 기기에만 남겼다 (커밋 안 됨 — git 레포가 아니거나 실패): ${result.filePath}\n`,
+    );
+    return 0;
+  }
+
+  // 훅이 안 깔려있어도 큐에 바로 넣는다 — (repoId, ref) 유니크라 훅이
+  // 나중에 같은 커밋을 또 넣어도 안전하다.
+  if (result.commitSha) {
+    ctx.store.enqueueIngest({
+      repoId: ctx.repoId,
+      repoPath: ctx.repoPath,
+      kind: "commit",
+      ref: result.commitSha,
+    });
+  }
+  process.stdout.write(`커밋했다: ${result.commitSha?.slice(0, 7) ?? "?"}  ${result.filePath}\n`);
   return 0;
 }
 

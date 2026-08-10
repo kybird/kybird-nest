@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, chmodSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 /**
  * git 연동 — 훅 설치와 커밋 재료 추출.
@@ -96,6 +96,66 @@ export function listCommits(dir: string, options: { since?: string; limit?: numb
   args.push(options.since ? `${options.since}..HEAD` : "HEAD");
   const out = gitOrNull(dir, args);
   return out === null || out.length === 0 ? [] : out.split("\n").map((l) => l.trim());
+}
+
+// ---- raw 노트 ----
+
+/**
+ * 파일시스템에 못 쓰는 문자를 지운다. 이메일을 폴더명으로 쓰므로 필요하다.
+ */
+function sanitizeForPath(id: string): string {
+  return id.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+/**
+ * `doc/raw/<작성자>/<날짜>.md` 상대경로. **사용자별로 파일을 쪼갠다** —
+ * 여러 사람이 같은 파일에 동시에 쓰면 병합 충돌이 구조적으로 생긴다
+ * (TTSTextViewer 의 doc/wiki/index.md 가 커밋의 10%를 잡아먹었던 실패,
+ * doc/raw/*.md 의 Case 번호 중복도 같은 원인). 파일이 사람마다 다르면
+ * 애초에 같은 파일을 두 프로세스가 건드릴 일이 없다.
+ */
+function rawRelPath(author: string, when: Date): string {
+  const day = when.toISOString().slice(0, 10);
+  return join("doc", "raw", sanitizeForPath(author), `${day}.md`);
+}
+
+export type RawCaptureResult = {
+  /** 실제로 쓴 파일의 절대경로. */
+  filePath: string;
+  /** git 커밋까지 됐는지. false 면 로컬 파일에만 남았다(git 레포가 아니거나 커밋 실패). */
+  committed: boolean;
+  commitSha: string | null;
+};
+
+/**
+ * raw 노트를 캡처한다 — 압축 안 된 원본을, 다듬는 부담 없이 남기는 자리.
+ *
+ * git 이 있으면 곧바로 커밋한다. 이러면 새 동기화 배관을 따로 안 깔아도
+ * **이미 있는** post-commit 훅 → ingest_queue → backfill 파이프라인이
+ * 이 노트를 그대로 소화한다. git 이 아니면(또는 커밋이 실패하면) 파일만
+ * 남는다 — git 은 전제가 아니라 편의 기능이라는 원칙 그대로다. 그 경우
+ * 이 노트는 공유·영구보존까지는 안 되고 이 기기에만 남는다.
+ */
+export function captureRaw(repoPath: string, author: string, note: string): RawCaptureResult {
+  const now = new Date();
+  const relPath = rawRelPath(author, now);
+  const absPath = join(repoPath, relPath);
+  mkdirSync(dirname(absPath), { recursive: true });
+
+  const time = now.toISOString().slice(11, 16);
+  appendFileSync(absPath, `## ${time}\n\n${note.trim()}\n\n`, "utf8");
+
+  if (!isGitRepo(repoPath)) {
+    return { filePath: absPath, committed: false, commitSha: null };
+  }
+  if (gitOrNull(repoPath, ["add", "--", relPath]) === null) {
+    return { filePath: absPath, committed: false, commitSha: null };
+  }
+  const summary = note.trim().split("\n")[0]!.slice(0, 72);
+  if (gitOrNull(repoPath, ["commit", "-m", `raw: ${summary}`, "--", relPath]) === null) {
+    return { filePath: absPath, committed: false, commitSha: null };
+  }
+  return { filePath: absPath, committed: true, commitSha: headCommit(repoPath) };
 }
 
 // ---- 훅 ----
