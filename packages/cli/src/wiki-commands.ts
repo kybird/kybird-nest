@@ -178,13 +178,15 @@ async function searchCmd(argv: string[], { store, repoId }: Ctx): Promise<number
 
   process.stdout.write(`\n  ${result.strategy} · ${result.tookMs}ms\n\n`);
   result.hits.forEach((hit, i) => {
-    const tags = hit.entry.tags.length > 0 ? `  ${hit.entry.tags.map((t) => `#${t}`).join(" ")}` : "";
-    const where = hit.entry.repoId === null ? "  (전역)" : "";
+    const tags = hit.entry.tags.length > 0 ? `  [${hit.entry.tags.join(", ")}]` : "";
+    const where = hit.entry.repoId === null ? " (전역)" : "";
+    // 이 도구의 주 사용자는 에이전트다 — 첫 줄만 보여주면 결과마다
+    // knest wiki show 를 또 불러야 해서 검색 한 번에 왕복이 N번 된다.
+    // 본문 전체를 여기서 바로 준다(MCP wiki_search 와 동일).
     process.stdout.write(
-      `  ${String(i + 1).padStart(2)}. ${hit.entry.title}${where}\n` +
-        // RRF 점수는 1/(60+순위) 규모라 소수점을 넉넉히 보여야 구분이 된다.
-        `      ${short(hit.entry.id)}  [${hit.entry.kind}]  ${hit.score.toFixed(4)}${tags}\n` +
-        `      ${snippet(hit.entry.body)}\n\n`,
+      `## ${i + 1}. ${hit.entry.title}${where}\n` +
+        `id: ${hit.entry.id} · 종류: ${hit.entry.kind}${tags}\n\n` +
+        `${hit.entry.body}\n\n---\n\n`,
     );
   });
 
@@ -198,12 +200,40 @@ async function searchCmd(argv: string[], { store, repoId }: Ctx): Promise<number
   return 0;
 }
 
+/**
+ * 검색 결과 화면엔 짧은 id(7자리)만 보인다 — 그대로 넘겨도 되게, 로그의
+ * resultIds 안에서 prefix 매칭한다. 짧은 id 를 그대로 recordUsage 에
+ * 넘기면 resultIds(전체 cuid)와 절대 안 겹쳐서 recall@k 가 항상 0으로
+ * 나오는 버그가 있었다 — 평가 로그가 "유일하게 소급 불가"한 데이터라
+ * 이게 조용히 깨지면 못 고친다.
+ */
 async function usedCmd(argv: string[], { store }: Ctx): Promise<number> {
-  const [logId, ...entryIds] = argv;
-  if (!logId || entryIds.length === 0) {
+  const [logId, ...refs] = argv;
+  if (!logId || refs.length === 0) {
     process.stderr.write("사용법: knest wiki used <로그id> <엔트리id>...\n");
     return 1;
   }
+
+  const log = store.getSearchLog(logId);
+  if (!log) {
+    process.stderr.write(`검색 로그를 찾을 수 없다: ${logId}\n`);
+    return 1;
+  }
+
+  const entryIds: string[] = [];
+  for (const ref of refs) {
+    const matches = log.resultIds.filter((id) => id.startsWith(ref));
+    if (matches.length === 0) {
+      process.stderr.write(`이 검색 결과에 없는 id: ${ref}\n`);
+      return 1;
+    }
+    if (matches.length > 1) {
+      process.stderr.write(`"${ref}" 로 시작하는 결과가 여럿이다. 더 길게 써라.\n`);
+      return 1;
+    }
+    entryIds.push(matches[0]!);
+  }
+
   recordUsage(store, logId, entryIds);
   process.stdout.write(`표시했다: ${entryIds.length}건\n`);
   return 0;
@@ -354,15 +384,6 @@ async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks).toString("utf8");
-}
-
-function snippet(body: string): string {
-  const line = body
-    .split("\n")
-    .map((l) => l.trim())
-    .find((l) => l.length > 0 && !l.startsWith("#"));
-  if (!line) return "";
-  return line.length > 90 ? line.slice(0, 87) + "…" : line;
 }
 
 function short(id: string): string {

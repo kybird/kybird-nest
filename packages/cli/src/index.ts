@@ -62,7 +62,7 @@ wiki
 
 칸반
   knest board                     현재 레포의 보드
-  knest add <제목> [--column 컬럼]
+  knest add <제목> [--column 컬럼] [--body 본문]
   knest mv <카드> <컬럼> [위치]
   knest edit <카드> <새 제목>
   knest rm <카드>
@@ -394,12 +394,12 @@ function showBoard(): Promise<number> {
 async function addCard(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
-    options: { column: { type: "string" } },
+    options: { column: { type: "string" }, body: { type: "string" } },
     allowPositionals: true,
   });
   const title = positionals.join(" ").trim();
   if (!title) {
-    process.stderr.write("제목이 필요하다: knest add <제목>\n");
+    process.stderr.write("제목이 필요하다: knest add <제목> [--body 본문]\n");
     return 1;
   }
 
@@ -410,7 +410,7 @@ async function addCard(argv: string[]): Promise<number> {
       process.stderr.write(`컬럼을 찾을 수 없다: ${values.column}\n`);
       return 1;
     }
-    const card = createCard(store, { repoId, columnId: column.id, title });
+    const card = createCard(store, { repoId, columnId: column.id, title, body: values.body });
     process.stdout.write(`${short(card.id)}  ${card.title}  →  ${column.title}\n`);
     await trySync(store);
     return 0;
