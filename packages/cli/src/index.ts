@@ -45,7 +45,8 @@ const HELP = `knest — kybird-nest 명령줄 도구
   knest sync                      서버와 맞춘다
   knest status                    아직 못 올린 변경과 충돌을 보여준다
   knest repo invite               참여 코드를 발급한다 (합류시킬 사람에게 전달)
-  knest repo join <repoId> <코드> 참여 코드로 레포에 합류한다
+  knest repo join <코드> [--repo repoId]  참여 코드로 레포에 합류한다
+                                  (.kybird/repo.json 이 있으면 repoId 는 자동)
 
 에이전트
   knest mcp                       MCP 서버로 붙는다 (에이전트가 실행)
@@ -208,7 +209,7 @@ async function link(argv: string[]): Promise<number> {
       // 레포다. 클라이언트만으로는 어느 쪽인지 구분할 수 없으니 둘 다 안내한다.
       process.stdout.write(
         `"${existing.link.repoId}" 레포에 연결은 돼 있지만 로컬엔 아직 없다.\n` +
-          `이 레포에 처음 합류하는 거라면: knest repo join ${existing.link.repoId} <초대 코드>\n` +
+          "이 레포에 처음 합류하는 거라면: knest repo join <초대 코드>\n" +
           "다른 머신에서 만든 내 레포라면: knest sync\n",
       );
       return 1;
@@ -235,7 +236,8 @@ async function link(argv: string[]): Promise<number> {
 const REPO_HELP = `knest repo — 레포 참여 관리
 
   knest repo invite               현재 레포의 참여 코드를 발급한다
-  knest repo join <repoId> <코드> 참여 코드로 레포에 합류한다
+  knest repo join <코드> [--repo repoId]  참여 코드로 레포에 합류한다
+                                  (.kybird/repo.json 이 있으면 repoId 는 자동)
 
 clone 만으로는 자동 합류가 안 된다 — .kybird/repo.json 의 repoId 는 git 에
 커밋되므로, 공개 레포라면 그 값 자체는 이미 공개돼 있다. 참여 코드는
@@ -268,7 +270,8 @@ async function repoInvite(): Promise<number> {
       process.stdout.write(
         `참여 코드: ${result.code}\n` +
           "이 코드는 지금 한 번만 보여준다 — 합류시킬 사람에게 직접 전달해라.\n" +
-          `합류: knest repo join ${repoId} ${result.code}\n`,
+          `합류 (git clone 받은 뒤): knest repo join ${result.code}\n` +
+          `합류 (아직 clone 전이면): knest repo join ${result.code} --repo ${repoId}\n`,
       );
       return 0;
     } catch (error) {
@@ -283,9 +286,28 @@ async function repoInvite(): Promise<number> {
  * 레포가 아직 로컬 스토어에 없는 상태이기 때문이다 — 그게 join 이 하는 일이다.
  */
 async function repoJoin(argv: string[]): Promise<number> {
-  const [repoId, code] = argv;
-  if (!repoId || !code) {
-    process.stderr.write("사용법: knest repo join <repoId> <초대 코드>\n");
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: { repo: { type: "string" } },
+    allowPositionals: true,
+  });
+  const code = positionals[0];
+  if (!code) {
+    process.stderr.write("사용법: knest repo join <초대 코드> [--repo <repoId>]\n");
+    return 1;
+  }
+
+  // git clone 으로 받았으면 .kybird/repo.json 에 repoId 가 이미 있다 —
+  // 굳이 또 타이핑 안 해도 된다. 그 파일이 없는 경우(레포를 아직 로컬에
+  // 안 받은 채로 코드만 먼저 받은 경우)에만 --repo 로 명시한다.
+  const linked = findLink(process.cwd());
+  const repoId = values.repo ?? linked?.link.repoId;
+  if (!repoId) {
+    process.stderr.write(
+      "repoId 를 모른다 — 이 디렉토리에 .kybird/repo.json 이 없다.\n" +
+        "git clone 으로 받은 레포면 그 파일이 있을 텐데 없다면, 초대한 사람에게 repoId 를 받아서\n" +
+        "knest repo join <코드> --repo <repoId> 로 실행해라.\n",
+    );
     return 1;
   }
 
@@ -297,7 +319,7 @@ async function repoJoin(argv: string[]): Promise<number> {
 
     // .kybird/repo.json 이 이미 있으면(git clone 으로 받은 것) 그대로 둔다.
     // 없으면(레포를 만들지 않고 join 부터 한 경우) 새로 만든다.
-    if (!findLink(process.cwd())) {
+    if (!linked) {
       writeLink(process.cwd(), { repoId: result.repo.id });
     }
 
@@ -584,7 +606,7 @@ async function withRepo(
       process.stderr.write(
         `연결된 레포가 로컬에 없다: ${linked.link.repoId}\n` +
           "다른 머신에서 만든 내 레포라면 knest sync 를 먼저 하면 된다.\n" +
-          `아직 합류 전인 레포라면 knest repo join ${linked.link.repoId} <초대 코드>\n`,
+          "아직 합류 전인 레포라면 knest repo join <초대 코드>\n",
       );
       return 1;
     }
