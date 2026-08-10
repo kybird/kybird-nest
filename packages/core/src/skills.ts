@@ -2,8 +2,23 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * `knest link`(또는 `repo join`) 시점에 `.claude/skills/knest/SKILL.md`를
- * 자동 생성한다.
+ * `knest link`(또는 `repo join`) 시점에 스킬 파일과 지시어 파일을 자동 생성한다.
+ *
+ * 두 종류를 심는다:
+ *
+ * 1. 스킬 파일 (on-demand 본문 — 에이전트가 description 을 보고 호출할 때만 읽힘):
+ *    `.claude/skills/knest/SKILL.md` — Claude Code (고유 경로)
+ *    `.agents/skills/knest/SKILL.md` — Codex CLI·Antigravity (고유), OpenCode·ZCode (호환)
+ *
+ * 2. 지시어 파일 (항상 시스템 프롬프트에 주입 — "Tier 0"):
+ *    `AGENTS.md` — Codex·ZCode·OpenCode 가 매 세션마다 전체를 읽는다. SSOT.
+ *    `CLAUDE.md` — Claude Code 는 AGENTS.md 를 안 읽으므로 `@AGENTS.md` 인클루드로 우회.
+ *    `GEMINI.md` — Antigravity 도 같은 이유로 `@AGENTS.md` 인클루드.
+ *
+ * 왜 지시어 파일이 따로 필요한가: 스킬은 name+description 카탈로그만 항상 주입되고
+ * 본문은 on-demand 다. 그래서 "칸반을 써라" 같은 강제 지시를 스킬 본문에만 두면
+ * 에이전트가 스킬을 호출하기 전엔 그 지시를 못 본다. AGENTS.md 는 전체가 항상
+ * 주입되므로(Tier 0), 강제 지시는 여기에 둬야 확실하다.
  *
  * 이건 brief.md 4단계(스킬 상속: 부모 고정, 파생본 개인 것)가 아니다 —
  * 그건 서버가 스킬을 보유하고 LLM이 매개해서 리베이스하는 훨씬 큰 작업이고
@@ -14,6 +29,19 @@ import { join } from "node:path";
  */
 
 const MARKER = "<!-- kybird-nest:generated -->";
+
+/** 스킬을 심을 상대경로들 (repoPath 기준). */
+const SKILL_DIRS = [".claude/skills/knest", ".agents/skills/knest"];
+
+/** 지시어를 심을 파일들 (repoPath 기준 파일명, 내용 팩토리). */
+type InstructionKind = "agents" | "claude" | "gemini";
+const INSTRUCTION_FILES: { name: string; kind: InstructionKind; body: () => string }[] = [
+  { name: "AGENTS.md", kind: "agents", body: agentsContent },
+  { name: "CLAUDE.md", kind: "claude", body: () => INCLUDE_AGENTS },
+  { name: "GEMINI.md", kind: "gemini", body: () => INCLUDE_AGENTS },
+];
+
+const INCLUDE_AGENTS = `${MARKER}\n@AGENTS.md\n`;
 
 function skillContent(): string {
   return `---
@@ -85,28 +113,103 @@ knest backfill --all                 밀린 커밋 전부를 한 번에 텍스�
 `;
 }
 
-export type SkillSetupResult =
-  | { status: "written"; path: string }
-  | { status: "skipped"; path: string; reason: "foreign" };
+/**
+ * AGENTS.md 본문. 항상 시스템 프롬프트에 주입되므로(Tier 0) 짧고 강령적이어야
+ * 한다 — 스킬 본문(skillContent)처럼 긴 절차를 다루지 않는다. 핵심 강제
+ * 지시(칸반 사용)와 도구 존재 알림만.
+ */
+function agentsContent(): string {
+  return `${MARKER}
+<!-- knest link 가 자동 생성한 파일이다. 직접 고쳐도 되지만, 그러면 이
+     마커가 없어져서 다음 link 때 덮어쓰지 않는다(사용자 수정 존중). -->
+
+# knest — 이 프로젝트의 지식·칸반 백엔드
+
+이 레포는 kybird-nest(knest)에 연결돼있다. 서버가 지식(wiki)과 칸반
+보드를 저장하고, 여러 사람·기기가 공유한다.
+
+## 칸반으로 작업을 관리해라
+
+작업을 시작할 때 보드를 보고, 새 작업은 카드로 만들어라:
+
+\`\`\`
+knest board                           현재 보드
+knest add "<제목>" [--column 컬럼]      카드 추가
+knest mv <카드> <컬럼>                 카드 옮기기
+\`\`\`
+
+## 작업 시작 전 — 먼저 검색해라
+
+\`\`\`
+knest wiki search "<찾고 싶은 것>"
+\`\`\`
+
+과거에(과거의 나 포함) 알아낸 게 있는지 먼저 본다. 실제로 참고한 항목은
+\`knest wiki used <로그id> <엔트리id>\` 로 표시한다.
+
+## 작업 끝나면 — 알게 된 걸 남겨라
+
+\`\`\`
+knest wiki add "제목" --body "본문" [--kind concept|pattern|gotcha|decision|reference]
+\`\`\`
+
+정리된 지식. 다듬을 시간이 없으면 \`knest wiki raw "메모"\`.
+
+자세한 명령은 \`knest help\`. (knest 스킬이 활성화돼 있으면 더 자세한
+절차가 스킬 본문에 있다.)
+`;
+}
+
+export type SkillTargetKind = "skill" | InstructionKind;
+
+export type SkillTarget =
+  | { path: string; kind: SkillTargetKind; status: "written" }
+  | { path: string; kind: SkillTargetKind; status: "skipped"; reason: "foreign" };
+
+export type SkillSetupResult = SkillTarget[];
 
 /**
- * `.claude/skills/knest/SKILL.md` 를 쓴다.
+ * 스킬 파일(2경로)과 지시어 파일(AGENTS/CLAUDE/GEMINI)을 쓴다.
  *
  * 이미 있는데 우리 마커가 없으면(사용자가 직접 만들었거나 고친 것)
  * 건드리지 않는다 — git hook 설치가 남의 훅을 안 덮어쓰는 것과 같은 이유.
+ * 파일별로 독립적으로 판단한다.
  */
 export function setupSkill(repoPath: string): SkillSetupResult {
-  const dir = join(repoPath, ".claude", "skills", "knest");
-  const path = join(dir, "SKILL.md");
+  const skillBody = skillContent();
+  const results: SkillTarget[] = [];
 
-  if (existsSync(path)) {
-    const current = readFileSync(path, "utf8");
-    if (!current.includes(MARKER)) {
-      return { status: "skipped", path, reason: "foreign" };
+  for (const rel of SKILL_DIRS) {
+    const dir = join(repoPath, rel);
+    const path = join(dir, "SKILL.md");
+
+    if (existsSync(path)) {
+      const current = readFileSync(path, "utf8");
+      if (!current.includes(MARKER)) {
+        results.push({ path, kind: "skill", status: "skipped", reason: "foreign" });
+        continue;
+      }
     }
+
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, skillBody, "utf8");
+    results.push({ path, kind: "skill", status: "written" });
   }
 
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(path, skillContent(), "utf8");
-  return { status: "written", path };
+  for (const f of INSTRUCTION_FILES) {
+    const path = join(repoPath, f.name);
+
+    if (existsSync(path)) {
+      const current = readFileSync(path, "utf8");
+      if (!current.includes(MARKER)) {
+        results.push({ path, kind: f.kind, status: "skipped", reason: "foreign" });
+        continue;
+      }
+    }
+
+    writeFileSync(path, f.body(), "utf8");
+    results.push({ path, kind: f.kind, status: "written" });
+  }
+
+  return results;
 }

@@ -22,3 +22,6 @@ build/
 
 # 세션 간 인수인계 메모 — 커밋하지 않는다
 .session-handoff.md
+
+# ZCode 세션 산물 (플랜 등) — 커밋하지 않는다
+.zcode/

@@ -591,9 +591,11 @@ async function backfillTopLevel(argv: string[]): Promise<number> {
 
 // ---- 거들기 ----
 
-function reportSkillSetup(result: SkillSetupResult): void {
-  if (result.status === "written") {
-    process.stdout.write(`스킬 파일도 심었다: ${result.path}\n`);
+function reportSkillSetup(results: SkillSetupResult): void {
+  const written = results.filter((r) => r.status === "written");
+  if (written.length > 0) {
+    const lines = written.map((r) => `  ${r.path}`).join("\n");
+    process.stdout.write(`스킬 파일도 심었다:\n${lines}\n`);
   }
   // foreign 이면 조용히 넘어간다 — 사용자가 이미 손댄 파일이라 매번
   // "안 건드렸다"고 알릴 것까진 없다.
@@ -647,7 +649,8 @@ async function trySync(store: Store): Promise<void> {
 }
 
 function findCard(store: Store, repoId: string, ref: string) {
-  const matches = store.listCardsByRepo(repoId).filter((c) => c.id.startsWith(ref));
+  const cleanRef = ref.startsWith("#") ? ref.slice(1) : ref;
+  const matches = store.listCardsByRepo(repoId).filter((c) => c.id.startsWith(cleanRef));
   if (matches.length === 0) {
     process.stderr.write(`카드를 찾을 수 없다: ${ref}\n`);
     return null;
@@ -669,7 +672,7 @@ function findColumn<T extends { id: string; title: string }>(columns: T[], ref: 
 }
 
 function short(id: string): string {
-  return id.slice(0, 7);
+  return `#${id.slice(0, 7)}`;
 }
 
 function basename(path: string): string {
