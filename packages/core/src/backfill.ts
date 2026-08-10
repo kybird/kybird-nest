@@ -41,7 +41,15 @@ export function collectBackfill(
   for (const queued of candidates) {
     if (items.length >= limit) break;
     const material = materialize(store, queued, options.maxDiffChars);
-    if (material) items.push(material);
+    if (!material) continue;
+    // 레포가 공유되면서 큐는 로컬 전용이라 팀원끼리 "이미 처리했나"를
+    // 모른다 — 대신 결과물(sourceRef)로 확인한다. 다른 멤버가 이미 이
+    // 커밋을 wiki 로 뽑아놨으면 조용히 넘긴다.
+    if (store.hasSourceRef(material.repoId, material.commit.sha)) {
+      store.markIngested(queued.id);
+      continue;
+    }
+    items.push(material);
   }
 
   return items;

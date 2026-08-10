@@ -429,6 +429,23 @@ export class Store {
     return rows.map((r) => fromDb("wikiEntries", r) as WikiEntry);
   }
 
+  /**
+   * 이 커밋이 이미 어떤 WikiEntry의 sourceRef로 기록됐는지 확인한다.
+   *
+   * 레포가 공유되면서 생긴 문제: backfill 큐는 로컬 전용이라 팀원끼리
+   * "이 커밋 이미 처리했나"를 모른다. 대신 결과물(WikiEntry)은 동기화되니
+   * 그걸로 대신 확인한다 — 짧은 sha(에이전트가 화면에 보이는 대로 적었을
+   * 경우)와 전체 sha 둘 다 맞춰본다.
+   */
+  hasSourceRef(repoId: string, fullSha: string): boolean {
+    const rows = this.db
+      .prepare(
+        "SELECT sourceRef FROM wiki_entries WHERE deletedAt IS NULL AND sourceRef IS NOT NULL AND (repoId = ? OR repoId IS NULL)",
+      )
+      .all(repoId) as { sourceRef: string }[];
+    return rows.some((r) => fullSha === r.sourceRef || fullSha.startsWith(r.sourceRef));
+  }
+
   putWikiEntry(entry: WikiEntry): void {
     this.db
       .prepare(
