@@ -10,6 +10,7 @@ import {
   inject,
   keywordRetriever,
   localEmbedder,
+  recordUsage,
   removeEntry,
   search,
   vectorRetriever,
@@ -32,6 +33,9 @@ export const WIKI_HELP = `knest wiki — 프로젝트 지식
   knest wiki search <질의> [--all] [--keyword|--semantic] [--limit N]
       기본은 하이브리드(키워드+벡터). --all 이면 내 모든 레포를 뒤진다.
 
+  knest wiki used <로그id> <엔트리id>...
+      검색 결과 중 실제로 써먹은 걸 표시한다. 검색 품질 평가의 정답셋이 된다.
+
   knest wiki list [--all]
   knest wiki show <엔트리>
   knest wiki rm <엔트리>
@@ -51,6 +55,8 @@ export async function wikiCommand(argv: string[], ctx: Ctx): Promise<number> {
       return raw(rest, ctx);
     case "search":
       return searchCmd(rest, ctx);
+    case "used":
+      return usedCmd(rest, ctx);
     case "list":
       return list(rest, ctx);
     case "show":
@@ -183,7 +189,23 @@ async function searchCmd(argv: string[], { store, repoId }: Ctx): Promise<number
   });
 
   // 에이전트가 이 로그 id 로 "실제로 뭘 썼는지" 되돌려줄 수 있다.
-  process.stdout.write(`  로그: ${result.logId}\n\n`);
+  process.stdout.write(
+    `  로그: ${result.logId}\n` +
+      `  실제로 쓴 항목이 있으면: knest wiki used ${result.logId} <엔트리id>...\n\n` +
+      "  이 결과로 작업을 진행했다면, 끝난 뒤 새로 알게 된 것을 knest wiki add(또는 raw)로 남겨라. " +
+      "다음 세션이 같은 걸 다시 알아내지 않아도 된다.\n\n",
+  );
+  return 0;
+}
+
+async function usedCmd(argv: string[], { store }: Ctx): Promise<number> {
+  const [logId, ...entryIds] = argv;
+  if (!logId || entryIds.length === 0) {
+    process.stderr.write("사용법: knest wiki used <로그id> <엔트리id>...\n");
+    return 1;
+  }
+  recordUsage(store, logId, entryIds);
+  process.stdout.write(`표시했다: ${entryIds.length}건\n`);
   return 0;
 }
 
