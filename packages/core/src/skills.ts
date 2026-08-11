@@ -89,6 +89,9 @@ knest wiki raw "메모"
 knest wiki index --out doc/wiki/    엔트리별 .md + index.md 를 폴더에 (생성물, 커밋 금지)
 \`\`\`
 
+주의: \`wiki index\` 는 **폴더 내보내기 전용**이다 — 검색 인덱싱이 아니다.
+검색용 벡터(임베딩)는 별개 명령 \`knest wiki embed\` 가 만든다. 헷갈리지 마라.
+
 ## 커밋할 때마다
 
 git hook 이 설치돼있으면, 커밋 직후에 "기록할 게 있으면 지금 남겨라"는
@@ -197,7 +200,8 @@ knest wiki add "제목" --body "본문" [--kind concept|pattern|gotcha|decision|
 
 정리된 지식. 다듬을 시간이 없으면 \`knest wiki raw "메모"\`.
 다른 엔트리를 참조할 땐 본문에 \`[[제목]]\` — wiki index 가 폴더로
-내보낸 뒤 옵시디언에서 링크가 연결된다.
+내보낸 뒤 옵시디언에서 링크가 연결된다. (wiki index 는 폴더 내보내기지
+검색 인덱싱이 아니다 — 벡터는 wiki embed 가 만든다.)
 
 자세한 명령은 \`knest help\`. (knest 스킬이 활성화돼 있으면 더 자세한
 절차가 스킬 본문에 있다.)

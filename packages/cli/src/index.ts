@@ -59,8 +59,8 @@ const HELP = `knest — kybird-nest 명령줄 도구
 wiki
   knest wiki add <제목>           지식을 넣는다 (본문은 표준입력)
   knest wiki search <질의>        하이브리드 검색
-  knest wiki embed                벡터를 만든다
-  knest wiki index                색인을 뽑는다
+  knest wiki embed                검색 벡터를 만든다 (의미 검색용)
+  knest wiki index                옵시디언 vault 폴더로 내보낸다 (검색 아님)
   knest wiki help                 자세히
 
 칸반

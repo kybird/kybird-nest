@@ -43,6 +43,9 @@ knest wiki raw "메모"
 knest wiki index --out doc/wiki/    엔트리별 .md + index.md 를 폴더에 (생성물, 커밋 금지)
 ```
 
+주의: `wiki index` 는 **폴더 내보내기 전용**이다 — 검색 인덱싱이 아니다.
+검색용 벡터(임베딩)는 별개 명령 `knest wiki embed` 가 만든다. 헷갈리지 마라.
+
 ## 커밋할 때마다
 
 git hook 이 설치돼있으면, 커밋 직후에 "기록할 게 있으면 지금 남겨라"는
