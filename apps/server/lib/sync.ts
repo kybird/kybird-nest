@@ -1,10 +1,12 @@
 import {
+  cardRejectedBySchema,
   changeSetSize,
   emptyChangeSet,
   incomingWins,
   newId,
   SYNC_PAGE_SIZE,
   type Card,
+  type CardRejectedBy,
   type ChangeSet,
   type Column,
   type Embedding,
@@ -293,6 +295,17 @@ async function writeColumn(
   });
 }
 
+/**
+ * DB 는 기각 주체를 그냥 String 으로 들고 있다(서버는 값을 해석하지 않는다 —
+ * brief.md 3장). 프로토콜로 올릴 때만 아는 값인지 확인하고, 모르는 값이면
+ * null 로 떨어뜨린다 — 낯선 루프 이름 하나 때문에 pull 전체가 깨지면 안 된다.
+ */
+export function parseRejectedBy(value: string | null): CardRejectedBy | null {
+  if (value === null) return null;
+  const parsed = cardRejectedBySchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 async function writeCard(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -307,6 +320,9 @@ async function writeCard(
     rank: card.rank,
     completedAt: fromMsOrNull(card.completedAt),
     regressCount: card.regressCount,
+    rejectedBy: card.rejectedBy,
+    rejectedReason: card.rejectedReason,
+    rejectedAt: fromMsOrNull(card.rejectedAt),
     updatedAt: fromMs(card.updatedAt),
     deletedAt: fromMsOrNull(card.deletedAt),
     seq,
@@ -481,6 +497,12 @@ export async function pullChanges(userId: string, cursor: number): Promise<PullR
           rank: item.row.rank,
           completedAt: toMsOrNull(item.row.completedAt),
           regressCount: item.row.regressCount,
+          // 서버는 기각 주체를 해석하지 않고 String 으로 들고만 있다. 여기서
+          // 좁혀주는 이유는 프로토콜 타입이 유니온이라서다 — 모르는 값이면
+          // null 로 떨어뜨린다(그 카드 하나 때문에 pull 전체가 깨지면 안 된다).
+          rejectedBy: parseRejectedBy(item.row.rejectedBy),
+          rejectedReason: item.row.rejectedReason,
+          rejectedAt: toMsOrNull(item.row.rejectedAt),
           updatedAt: toMs(item.row.updatedAt),
           deletedAt: toMsOrNull(item.row.deletedAt),
         });

@@ -18,6 +18,7 @@ import {
   loadConfig,
   localEmbedder,
   moveCard,
+  rejectCard,
   recordUsage,
   search,
   storePath,
@@ -25,7 +26,13 @@ import {
   vectorRetriever,
   type Retriever,
 } from "@kybird/core";
-import { wikiEntryKindSchema } from "@kybird/shared";
+import {
+  cardRejectedBySchema,
+  cardRejectionOwner,
+  LOOP_LABEL,
+  LOOP_SUBJECT,
+  wikiEntryKindSchema,
+} from "@kybird/shared";
 
 /**
  * MCP 표면.
@@ -366,6 +373,42 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       const card = moveCard(ctx.store, cardId, columnId, position);
       const note = await trySync(ctx.store);
       return text(`옮겼다: ${card.title}${note ? `\n${note}` : ""}`);
+    },
+  );
+
+  server.registerTool(
+    "kanban_reject_card",
+    {
+      title: "카드 기각",
+      description:
+        "검증에 실패했거나 요구사항이 틀린 카드를 상류로 되돌린다. 사유가 필수다 — " +
+        "받는 쪽은 이 사유만 보고 고치므로, 무엇이 왜 잘못됐는지 구체적으로 써라. " +
+        "그냥 kanban_move_card 로 되돌리면 사유가 안 남아서 같은 일이 반복된다.",
+      inputSchema: {
+        cardId: z.string(),
+        reason: z.string().describe("왜 튕겼는지. 받는 쪽이 이것만 보고 고친다"),
+        by: cardRejectedBySchema
+          .optional()
+          .describe(
+            "qa = 검증 실패라 개발이 받는다(기본). dev = 요구사항이 틀렸거나 불가능해서 기획이 받는다",
+          ),
+        columnId: z.string().optional().describe("되돌릴 컬럼. 생략하면 맨 앞 컬럼"),
+      },
+    },
+    async ({ cardId, reason, by, columnId }) => {
+      const rejectedBy = by ?? "qa";
+      const card = rejectCard(ctx.store, cardId, {
+        by: rejectedBy,
+        reason,
+        ...(columnId === undefined ? {} : { toColumnId: columnId }),
+      });
+      const owner = LOOP_SUBJECT[cardRejectionOwner(rejectedBy)];
+      const note = await trySync(ctx.store);
+      return text(
+        `기각했다: ${card.title}\n` +
+          `${LOOP_LABEL[rejectedBy]} 기각 → ${owner} 받는다 (회귀 ${card.regressCount}회)\n` +
+          `사유: ${reason}${note ? `\n${note}` : ""}`,
+      );
     },
   );
 

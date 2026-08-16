@@ -6,9 +6,10 @@ import {
   rankBetween,
   type Card,
   type Column,
+  type CardRejectedBy,
 } from "@kybird/shared";
 import { prisma } from "./prisma";
-import { applyChanges } from "./sync";
+import { applyChanges, parseRejectedBy } from "./sync";
 
 /**
  * 웹 UI 의 보드 조작.
@@ -26,6 +27,49 @@ export type Board = {
 
 const toMs = (d: Date): number => d.getTime();
 const toMsOrNull = (d: Date | null): number | null => (d === null ? null : d.getTime());
+
+/** Prisma 행에서 프로토콜 Card 로 옮길 때 필요한 모양. */
+type CardRow = {
+  id: string;
+  repoId: string;
+  columnId: string;
+  title: string;
+  body: string;
+  rank: string;
+  completedAt: Date | null;
+  regressCount: number;
+  rejectedBy: string | null;
+  rejectedReason: string | null;
+  rejectedAt: Date | null;
+  updatedAt: Date;
+  deletedAt: Date | null;
+};
+
+/**
+ * Prisma 행 → 프로토콜 Card.
+ *
+ * 이 변환이 원래 다섯 군데에 복붙돼 있었다. 필드가 하나 늘 때마다 다섯 곳을
+ * 다 고쳐야 했고, 한 곳을 빼먹으면 그 경로로 쓴 카드만 조용히 필드를 잃는다.
+ * 한 곳으로 모아서 그 실수 자체를 없앤다.
+ */
+function asCard(row: CardRow): Card {
+  return {
+    id: row.id,
+    repoId: row.repoId,
+    columnId: row.columnId,
+    title: row.title,
+    body: row.body,
+    rank: row.rank,
+    completedAt: toMsOrNull(row.completedAt),
+    regressCount: row.regressCount,
+    rejectedBy: parseRejectedBy(row.rejectedBy),
+    rejectedReason: row.rejectedReason,
+    rejectedAt: toMsOrNull(row.rejectedAt),
+    updatedAt: toMs(row.updatedAt),
+    deletedAt: toMsOrNull(row.deletedAt),
+  };
+}
+
 
 export async function loadBoard(userId: string, repoId: string): Promise<Board | null> {
   const membership = await prisma.repoMember.findUnique({
@@ -56,19 +100,6 @@ export async function loadBoard(userId: string, repoId: string): Promise<Board |
     updatedAt: toMs(c.updatedAt),
     deletedAt: toMsOrNull(c.deletedAt),
   });
-  const asCard = (c: (typeof cards)[number]): Card => ({
-    id: c.id,
-    repoId: c.repoId,
-    columnId: c.columnId,
-    title: c.title,
-    body: c.body,
-    rank: c.rank,
-    completedAt: toMsOrNull(c.completedAt),
-    regressCount: c.regressCount,
-    updatedAt: toMs(c.updatedAt),
-    deletedAt: toMsOrNull(c.deletedAt),
-  });
-
   const allCards = cards.map(asCard);
   return {
     repo,
@@ -108,6 +139,9 @@ export async function addCard(
     rank: rankBetween(last, null),
     completedAt: column?.isDone ? ts : null,
     regressCount: 0,
+    rejectedBy: null,
+    rejectedReason: null,
+    rejectedAt: null,
     updatedAt: ts,
     deletedAt: null,
   };
@@ -146,12 +180,20 @@ export async function moveCard(
 
   // 완료 진입/이탈 감지. regressCount 로 반복 회귀를 잡는다.
   // card.completedAt 은 Prisma 의 Date — 프로토콜(ms)로 정규화해서 작업한다.
-  let completedAt: number | null = card.completedAt ? toMs(card.completedAt) : null;
-  let regressCount = card.regressCount;
+  const before = asCard(card);
+  let completedAt = before.completedAt;
+  let regressCount = before.regressCount;
+  // 완료에 도달하면 지난 기각은 해소된 것이다 — core 쪽 moveCard 와 같은 규칙.
+  let rejection: Pick<Card, "rejectedBy" | "rejectedReason" | "rejectedAt"> = {
+    rejectedBy: before.rejectedBy,
+    rejectedReason: before.rejectedReason,
+    rejectedAt: before.rejectedAt,
+  };
   const sameColumn = card.columnId === toColumnId;
   if (!sameColumn) {
     if (column.isDone && completedAt === null) {
       completedAt = now();
+      rejection = { rejectedBy: null, rejectedReason: null, rejectedAt: null };
     } else if (!column.isDone && completedAt !== null) {
       regressCount += 1;
       completedAt = null;
@@ -159,18 +201,69 @@ export async function moveCard(
   }
 
   const moved: Card = {
-    id: card.id,
+    ...before,
     repoId: column.repoId,
     columnId: toColumnId,
-    title: card.title,
-    body: card.body,
     rank: rankBetween(prev, next),
     completedAt,
     regressCount,
+    ...rejection,
     updatedAt: now(),
     deletedAt: null,
   };
   await applyChanges(userId, { ...emptyChangeSet(), cards: [moved] });
+}
+
+/**
+ * 카드를 기각해서 상류로 되돌린다. core 의 `rejectCard` 와 같은 규칙이다.
+ *
+ * 이동을 `moveCard` 에 맡기는 것도 같다 — 완료에서 나올 때의 `regressCount`
+ * 증가가 거기 있고, 기각은 그 전이의 특수한 경우다.
+ */
+export async function rejectCard(
+  userId: string,
+  cardId: string,
+  input: { by: CardRejectedBy; reason: string; toColumnId?: string },
+): Promise<void> {
+  const reason = input.reason.trim();
+  if (reason.length === 0) {
+    throw new Error("기각 사유는 비울 수 없다 — 받는 쪽이 고칠 수 없다");
+  }
+
+  const card = await prisma.card.findFirst({ where: { id: cardId, deletedAt: null } });
+  if (!card) throw new Error("카드를 찾을 수 없다");
+
+  let toColumnId = input.toColumnId;
+  if (toColumnId === undefined) {
+    const columns = await prisma.column.findMany({
+      where: { repoId: card.repoId, deletedAt: null },
+      select: { id: true, rank: true },
+    });
+    const first = columns.sort(byRank)[0];
+    if (!first) throw new Error("레포에 컬럼이 없다");
+    toColumnId = first.id;
+  }
+
+  // 맨 뒤에 놓는다. 기각된 카드가 남의 순서를 밀고 들어갈 이유는 없다.
+  const siblings = await prisma.card.count({
+    where: { columnId: toColumnId, deletedAt: null, NOT: { id: cardId } },
+  });
+  await moveCard(userId, cardId, toColumnId, siblings);
+
+  const moved = await prisma.card.findFirst({ where: { id: cardId } });
+  if (!moved) throw new Error("카드를 찾을 수 없다");
+  await applyChanges(userId, {
+    ...emptyChangeSet(),
+    cards: [
+      {
+        ...asCard(moved),
+        rejectedBy: input.by,
+        rejectedReason: reason,
+        rejectedAt: now(),
+        updatedAt: now(),
+      },
+    ],
+  });
 }
 
 export async function editCard(
@@ -184,14 +277,9 @@ export async function editCard(
     ...emptyChangeSet(),
     cards: [
       {
-        id: card.id,
-        repoId: card.repoId,
-        columnId: card.columnId,
+        ...asCard(card),
         title: patch.title ?? card.title,
         body: patch.body ?? card.body,
-        rank: card.rank,
-        completedAt: card.completedAt ? toMs(card.completedAt) : null,
-        regressCount: card.regressCount,
         updatedAt: now(),
         deletedAt: null,
       },
@@ -206,20 +294,7 @@ export async function deleteCard(userId: string, cardId: string): Promise<void> 
   const timestamp = now();
   await applyChanges(userId, {
     ...emptyChangeSet(),
-    cards: [
-      {
-        id: card.id,
-        repoId: card.repoId,
-        columnId: card.columnId,
-        title: card.title,
-        body: card.body,
-        rank: card.rank,
-        completedAt: card.completedAt ? toMs(card.completedAt) : null,
-        regressCount: card.regressCount,
-        updatedAt: timestamp,
-        deletedAt: timestamp,
-      },
-    ],
+    cards: [{ ...asCard(card), updatedAt: timestamp, deletedAt: timestamp }],
   });
 }
 
@@ -232,20 +307,7 @@ export async function restoreCard(userId: string, cardId: string): Promise<void>
   if (!card || card.deletedAt === null) return;
   await applyChanges(userId, {
     ...emptyChangeSet(),
-    cards: [
-      {
-        id: card.id,
-        repoId: card.repoId,
-        columnId: card.columnId,
-        title: card.title,
-        body: card.body,
-        rank: card.rank,
-        completedAt: card.completedAt ? toMs(card.completedAt) : null,
-        regressCount: card.regressCount,
-        updatedAt: now(),
-        deletedAt: null,
-      },
-    ],
+    cards: [{ ...asCard(card), updatedAt: now(), deletedAt: null }],
   });
 }
 
@@ -264,18 +326,7 @@ export async function listDeletedCards(
     where: { repoId, deletedAt: { not: null } },
     orderBy: { updatedAt: "desc" },
   });
-  return cards.map((c) => ({
-    id: c.id,
-    repoId: c.repoId,
-    columnId: c.columnId,
-    title: c.title,
-    body: c.body,
-    rank: c.rank,
-    completedAt: toMsOrNull(c.completedAt),
-    regressCount: c.regressCount,
-    updatedAt: toMs(c.updatedAt),
-    deletedAt: toMsOrNull(c.deletedAt),
-  }));
+  return cards.map(asCard);
 }
 
 export async function addColumn(userId: string, repoId: string, title: string): Promise<void> {

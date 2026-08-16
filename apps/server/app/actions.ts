@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { credentialsSchema, newId } from "@kybird/shared";
+import { credentialsSchema, newId, type CardRejectedBy } from "@kybird/shared";
 import { prisma } from "@/lib/prisma";
 import { generateToken, hashPassword, verifyPassword } from "@/lib/auth";
 import { clearSession, currentUser, setSession } from "@/lib/session";
@@ -105,6 +105,21 @@ export async function moveCardAction(
 ): Promise<void> {
   const user = await requireUser();
   await boardOps.moveCard(user.id, cardId, toColumnId, position);
+  revalidatePath(`/repo/${repoId}`);
+  revalidatePath("/");
+}
+
+/** 카드를 기각해서 상류로 되돌린다. 사유가 비면 아무것도 안 한다. */
+export async function rejectCardAction(
+  repoId: string,
+  cardId: string,
+  by: CardRejectedBy,
+  reason: string,
+): Promise<void> {
+  const trimmed = reason.trim();
+  if (!trimmed) return;
+  const user = await requireUser();
+  await boardOps.rejectCard(user.id, cardId, { by, reason: trimmed });
   revalidatePath(`/repo/${repoId}`);
   revalidatePath("/");
 }

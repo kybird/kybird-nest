@@ -2,10 +2,13 @@
  * MCP 서버를 실제 클라이언트로 붙어서 확인한다.
  * 도구가 등록만 되고 실제로는 안 돌아가는 일이 흔해서, 호출까지 해본다.
  */
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const CLI = "D:/Project/kybird-nest/packages/cli/dist/index.js";
+// 이 파일 기준으로 찾는다. 절대경로를 박아두면 그 사람 머신에서만 돈다
+// (실제로 Windows 경로가 박혀 있어서 다른 OS 에서는 아예 실행이 안 됐다).
+const CLI = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const cwd = process.env.PROJ;
 
 let fails = 0;
@@ -88,6 +91,34 @@ ok(moved.includes("옮겼다"), "kanban_move_card 동작");
 const boardAfter = await call("kanban_board", {});
 ok(/## 완료 \(1\)/.test(boardAfter), "이동이 보드에 반영된다");
 void colId;
+
+// --- 기각: 완료된 카드를 상류로 되돌린다 ---
+const rejected = await call("kanban_reject_card", {
+  cardId,
+  reason: "로그인 후 새로고침하면 세션이 풀린다",
+});
+ok(rejected.includes("QA 기각"), "기본 기각 주체는 QA 다");
+ok(rejected.includes("개발이 받는다"), "QA 기각은 개발이 받는다");
+ok(rejected.includes("회귀 1회"), "기각은 회귀로 잡힌다");
+
+const afterReject = await call("kanban_board", {});
+ok(/## 완료 \(0\)/.test(afterReject), "기각하면 완료에서 빠진다");
+
+// 사유는 필수다 — 빈 사유로는 기각이 안 돼야 한다.
+// SDK 는 도구가 던진 예외를 클라이언트 예외로 올리지 않고 isError 로 돌려준다.
+const blank = await client.callTool({
+  name: "kanban_reject_card",
+  arguments: { cardId, reason: "   " },
+});
+ok(blank.isError === true, "빈 사유는 거부한다");
+
+// 개발 기각은 기획으로 올라간다.
+const devReject = await call("kanban_reject_card", {
+  cardId,
+  reason: "요구사항 자체가 오프라인을 고려하지 않았다",
+  by: "dev",
+});
+ok(devReject.includes("기획이 받는다"), "개발 기각은 기획이 받는다");
 
 await client.close();
 console.log(fails ? `\n실패 ${fails}건` : "\n전부 통과");

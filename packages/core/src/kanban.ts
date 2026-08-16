@@ -1,4 +1,14 @@
-import { newId, now, rankBetween, type Card, type Column, type Repo } from "@kybird/shared";
+import {
+  newId,
+  now,
+  rankBetween,
+  regressionReport,
+  type Card,
+  type Column,
+  type RegressionReport,
+  type CardRejectedBy,
+  type Repo,
+} from "@kybird/shared";
 import type { Store } from "./store.js";
 
 /** 새 레포에 기본으로 깔아주는 컬럼. */
@@ -62,6 +72,9 @@ export function createCard(
     rank: rankBetween(last, null),
     completedAt: targetColumn?.isDone ? now() : null,
     regressCount: 0,
+    rejectedBy: null,
+    rejectedReason: null,
+    rejectedAt: null,
     updatedAt: now(),
     deletedAt: null,
   };
@@ -112,11 +125,17 @@ export function moveCard(
 
   // 완료 진입/이탈 감지. regressCount 로 반복 회귀를 잡는다.
   let { completedAt, regressCount } = card;
+  let { rejectedBy, rejectedReason, rejectedAt } = card;
   const sameColumn = card.columnId === toColumnId;
   if (!sameColumn) {
     if (column.isDone && completedAt === null) {
       // 완료가 아닌 곳에서 완료로 — 완료 시각 찍기.
       completedAt = now();
+      // 완료에 도달했으면 지난 기각은 해소된 것이다. 안 지우면 다음 루프가
+      // 이미 고쳐진 사유를 읽고 또 손대게 된다.
+      rejectedBy = null;
+      rejectedReason = null;
+      rejectedAt = null;
     } else if (!column.isDone && completedAt !== null) {
       // 완료에서 완료가 아닌 곳으로 — 회귀. 카운트 올리고 completedAt 리셋.
       regressCount += 1;
@@ -131,10 +150,61 @@ export function moveCard(
     rank: rankBetween(prev, next),
     completedAt,
     regressCount,
+    rejectedBy,
+    rejectedReason,
+    rejectedAt,
     updatedAt: now(),
   };
   store.putCard(updated);
   return updated;
+}
+
+/**
+ * 카드를 기각해서 상류로 되돌린다.
+ *
+ * brief.md 0장의 순환은 **기각이 상류로 돌아가야 닫힌다.** 그냥 컬럼만 옮기면
+ * 왜 튕겼는지가 사라져서 받는 쪽이 같은 걸 또 만든다 — 그래서 사유가 필수다.
+ *
+ * 목적지 컬럼은 기본으로 **맨 앞 컬럼**("할 일")이다. 지금은 세 루프가 보드
+ * 하나를 같이 쓰기 때문에 QA 기각이든 개발 기각이든 갈 곳이 같고, 누가 집어야
+ * 하는지는 `rejectedBy` 가 가른다. 루프별로 컬럼을 나누게 되면 `toColumnId` 로
+ * 목적지를 지정하면 되고 이 함수는 안 바뀐다.
+ *
+ * 이동 자체는 `moveCard` 에 맡긴다 — 완료에서 나오는 경우의 `regressCount`
+ * 증가가 거기 있고, 기각은 그 전이의 특수한 경우일 뿐이라 두 번 셀 이유가 없다.
+ */
+export function rejectCard(
+  store: Store,
+  cardId: string,
+  input: { by: CardRejectedBy; reason: string; toColumnId?: string },
+): Card {
+  const reason = input.reason.trim();
+  if (reason.length === 0) {
+    throw new Error("기각 사유는 비울 수 없다 — 받는 쪽이 고칠 수 없다");
+  }
+
+  const card = store.getCard(cardId);
+  if (!card) throw new Error(`카드를 찾을 수 없다: ${cardId}`);
+
+  const toColumnId = input.toColumnId ?? firstColumnId(store, card.repoId);
+  const moved = moveCard(store, cardId, toColumnId);
+
+  const updated: Card = {
+    ...moved,
+    rejectedBy: input.by,
+    rejectedReason: reason,
+    rejectedAt: now(),
+    updatedAt: now(),
+  };
+  store.putCard(updated);
+  return updated;
+}
+
+function firstColumnId(store: Store, repoId: string): string {
+  const columns = store.listColumns(repoId);
+  const first = columns[0];
+  if (!first) throw new Error(`레포에 컬럼이 없다: ${repoId}`);
+  return first.id;
 }
 
 /** 삭제는 툼스톤이다. 진짜로 지우면 다른 머신이 삭제를 알 방법이 없다. */
@@ -184,4 +254,15 @@ export function board(store: Store, repoId: string): BoardView {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+/**
+ * 보드 전체의 회귀 상태를 요약한다.
+ *
+ * 계산 자체는 `@kybird/shared` 에 있다 — 웹 대시보드도 같은 판단을 해야 하는데
+ * core 를 임포트하면 `better-sqlite3` 까지 딸려오기 때문이다. 여기 있는 건
+ * BoardView 를 카드 목록으로 펴주는 어댑터일 뿐이다.
+ */
+export function boardRegressionReport(view: BoardView): RegressionReport {
+  return regressionReport(view.columns.flatMap(({ cards }) => cards));
 }

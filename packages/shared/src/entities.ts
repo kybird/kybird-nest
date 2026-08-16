@@ -36,6 +36,44 @@ export const columnSchema = syncMetaSchema.extend({
 });
 export type Column = z.infer<typeof columnSchema>;
 
+/**
+ * 카드를 기각한 루프.
+ *
+ * brief.md 0장의 세 루프(기획→개발→QA)에서 **기각은 상류로 되돌아간다** —
+ * QA가 기각하면 개발이, 개발이 기각하면(요구사항이 틀렸거나 불가능) 기획이
+ * 받는다. 그래서 기록해야 하는 건 "어디로 가는지"가 아니라 **누가 튕겼는지**다.
+ * 목적지는 거기서 따라 나온다.
+ *
+ * 이름에 `card` 를 붙인 이유는 `sync.ts` 에 이미 `Rejection` 이 있어서다 —
+ * 그건 **서버가 push 를 거부한 것**이라 여기와 완전히 다른 개념이다.
+ */
+export const cardRejectedBySchema = z.enum(["qa", "dev"]);
+export type CardRejectedBy = z.infer<typeof cardRejectedBySchema>;
+
+/** 기각을 받는 쪽. 상류가 누구인지는 기각한 루프가 결정한다. */
+export function cardRejectionOwner(by: CardRejectedBy): "dev" | "plan" {
+  return by === "qa" ? "dev" : "plan";
+}
+
+/** 사람에게 보여줄 루프 이름. */
+export const LOOP_LABEL: Record<CardRejectedBy | "plan", string> = {
+  qa: "QA",
+  dev: "개발",
+  plan: "기획",
+};
+
+/**
+ * 주격 조사까지 붙인 형태.
+ *
+ * 받침 유무가 이름마다 달라서("QA가" vs "개발이") 문장에서 조사를 그냥 이어
+ * 붙이면 틀린다. 루프는 셋뿐이라 일반적인 조사 판정 대신 그냥 적어둔다.
+ */
+export const LOOP_SUBJECT: Record<CardRejectedBy | "plan", string> = {
+  qa: "QA가",
+  dev: "개발이",
+  plan: "기획이",
+};
+
 /** 칸반 카드. */
 export const cardSchema = syncMetaSchema.extend({
   repoId: z.string().min(1).max(64),
@@ -47,6 +85,19 @@ export const cardSchema = syncMetaSchema.extend({
   completedAt: z.number().int().nonnegative().nullable(),
   /** 완료에서 빠져나간 횟수. 반복 회귀 감지. */
   regressCount: z.number().int().nonnegative(),
+  /**
+   * 마지막 기각의 주체. 기각된 적이 없거나 이후 다시 완료됐으면 null.
+   *
+   * **이력이 아니라 최신 한 건만 들고 있다.** 하류 루프가 행동하려면 "지금
+   * 무엇이 문제인가"만 있으면 되고, 몇 번 튕겼는지는 `regressCount` 가 이미
+   * 센다. 이력을 별도 엔티티로 두면 싱크 배관이 하나 더 생기는데 지금 값어치가
+   * 그만큼은 아니다 — 필요해지면 그때 append-only 엔티티로 승격한다.
+   */
+  rejectedBy: cardRejectedBySchema.nullable(),
+  /** 왜 튕겼는지. 상류가 이걸 읽고 고친다 — 비어있으면 기각이 무의미하다. */
+  rejectedReason: z.string().max(5000).nullable(),
+  /** 기각 시각(ms). */
+  rejectedAt: z.number().int().nonnegative().nullable(),
 });
 export type Card = z.infer<typeof cardSchema>;
 

@@ -5,6 +5,7 @@ import {
   OfflineError,
   Store,
   board,
+  boardRegressionReport,
   createCard,
   createRepo,
   deleteCard,
@@ -18,6 +19,7 @@ import {
   login,
   moveCard,
   register,
+  rejectCard,
   requireToken,
   restoreCard,
   saveConfig,
@@ -25,10 +27,18 @@ import {
   storePath,
   sync,
   writeLink,
+  type BoardView,
   type Config,
   type SkillSetupResult,
 } from "@kybird/core";
-import { changeSetSize } from "@kybird/shared";
+import {
+  cardRejectedBySchema,
+  cardRejectionOwner,
+  changeSetSize,
+  LOOP_LABEL,
+  LOOP_SUBJECT,
+  REGRESS_STALL_THRESHOLD,
+} from "@kybird/shared";
 import { ask, askSecret } from "./prompt.js";
 import { wikiCommand, WIKI_HELP } from "./wiki-commands.js";
 import { backfillCommand, hookCommand, BACKFILL_HELP, HOOK_HELP } from "./hook-commands.js";
@@ -67,6 +77,8 @@ wiki
   knest board                     현재 레포의 보드
   knest add <제목> [--column 컬럼] [--body 본문]
   knest mv <카드> <컬럼> [위치]
+  knest reject <카드> <사유> [--as qa|dev] [--to 컬럼]
+                                  기각해서 상류로 되돌린다 (사유 필수)
   knest edit <카드> [새 제목] [--body 본문]
   knest rm <카드>
   knest trash                     보관함 (삭제된 카드 목록)
@@ -110,6 +122,8 @@ async function main(argv: string[]): Promise<number> {
       return addCard(rest);
     case "mv":
       return moveCommand(rest);
+    case "reject":
+      return rejectCommand(rest);
     case "edit":
       return editCommand(rest);
     case "rm":
@@ -396,6 +410,14 @@ function showBoard(): Promise<number> {
       for (const card of cards) {
         const regress = card.regressCount > 0 ? `  ↺${card.regressCount}` : "";
         process.stdout.write(`    ${short(card.id)}  ${card.title}${regress}\n`);
+        // 기각 사유는 본문보다 먼저 보여준다 — 이 카드를 집는 사람이 제일
+        // 먼저 알아야 하는 게 "왜 되돌아왔나"다.
+        if (card.rejectedBy !== null && card.rejectedReason !== null) {
+          const owner = LOOP_LABEL[cardRejectionOwner(card.rejectedBy)];
+          process.stdout.write(
+            `        ⤺ ${LOOP_LABEL[card.rejectedBy]} 기각 → ${owner}: ${card.rejectedReason}\n`,
+          );
+        }
         const body = card.body?.trim();
         if (body) {
           // 첫 두 줄만 보여주고, 더 길면 말줄임.
@@ -407,8 +429,35 @@ function showBoard(): Promise<number> {
       }
     }
     process.stdout.write("\n");
+    writeRegressionSummary(view);
     return 0;
   });
+}
+
+/**
+ * 보드 아래에 회귀 요약을 붙인다.
+ *
+ * 카드마다 `↺N` 이 이미 찍히지만, 그건 카드를 하나씩 봐야 눈에 들어온다.
+ * 계기판은 **안 찾아봐도 눈에 띄어야** 뜻이 있으므로 보드 끝에 항상 붙인다.
+ * 회귀가 아예 없으면 아무것도 안 쓴다 — 조용할 때 조용해야 시끄러울 때 읽힌다.
+ */
+function writeRegressionSummary(view: BoardView): void {
+  const report = boardRegressionReport(view);
+  if (report.regressed.length === 0) return;
+
+  process.stdout.write(
+    `  회귀: 카드 ${report.regressed.length}개 / 되돌아간 횟수 ${report.totalRegressions}회\n`,
+  );
+
+  if (report.stalled.length > 0) {
+    process.stdout.write(
+      `  ⚠ ${REGRESS_STALL_THRESHOLD}회 이상 회귀 — 카드 정의나 접근을 다시 봐라:\n`,
+    );
+    for (const card of report.stalled) {
+      process.stdout.write(`    ↺${card.regressCount}  ${short(card.id)}  ${card.title}\n`);
+    }
+  }
+  process.stdout.write("\n");
 }
 
 async function addCard(argv: string[]): Promise<number> {
@@ -459,6 +508,70 @@ async function moveCommand(argv: string[]): Promise<number> {
     }
     moveCard(store, card.id, column.id, position);
     process.stdout.write(`${short(card.id)}  ${card.title}  →  ${column.title}\n`);
+    await trySync(store);
+    return 0;
+  });
+}
+
+/**
+ * 카드를 기각해서 상류로 되돌린다.
+ *
+ * `mv` 로도 컬럼은 옮길 수 있지만, 그러면 **왜 튕겼는지가 안 남는다.** 받는
+ * 쪽이 사유 없이 같은 카드를 다시 만나면 같은 결과가 나온다 — 그래서 사유가
+ * 위치 인자로 필수다(빼먹으면 사용법이 뜬다).
+ */
+async function rejectCommand(argv: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: { as: { type: "string" }, to: { type: "string" } },
+    allowPositionals: true,
+  });
+  const [cardRef, ...reasonParts] = positionals;
+  const reason = reasonParts.join(" ").trim();
+
+  if (!cardRef || reason.length === 0) {
+    process.stderr.write(
+      "사용법: knest reject <카드> <사유> [--as qa|dev] [--to 컬럼]\n" +
+        "  --as  누가 기각하는가. 기본 qa (QA 기각 → 개발이 받는다)\n" +
+        "        dev 면 개발 기각 — 요구사항이 틀렸거나 불가능하다는 뜻이라 기획이 받는다\n" +
+        "  --to  되돌릴 컬럼. 기본은 맨 앞 컬럼\n",
+    );
+    return 1;
+  }
+
+  const parsedBy = cardRejectedBySchema.safeParse(values.as ?? "qa");
+  if (!parsedBy.success) {
+    process.stderr.write(`--as 는 qa 또는 dev 여야 한다: ${values.as}\n`);
+    return 1;
+  }
+  const by = parsedBy.data;
+
+  return withRepo(async (store, repoId) => {
+    const card = findCard(store, repoId, cardRef);
+    if (!card) return 1;
+
+    let toColumnId: string | undefined;
+    if (values.to !== undefined) {
+      const column = findColumn(store.listColumns(repoId), values.to);
+      if (!column) {
+        process.stderr.write(`컬럼을 찾을 수 없다: ${values.to}\n`);
+        return 1;
+      }
+      toColumnId = column.id;
+    }
+
+    const rejected = rejectCard(store, card.id, {
+      by,
+      reason,
+      ...(toColumnId === undefined ? {} : { toColumnId }),
+    });
+    const column = store.getColumn(rejected.columnId);
+    const owner = LOOP_SUBJECT[cardRejectionOwner(by)];
+    process.stdout.write(
+      `${short(rejected.id)}  ${rejected.title}  →  ${column?.title ?? "?"}\n` +
+        `  ${LOOP_LABEL[by]} 기각 · ${owner} 받는다 · ↺${rejected.regressCount}\n` +
+        `  사유: ${reason}\n`,
+    );
     await trySync(store);
     return 0;
   });

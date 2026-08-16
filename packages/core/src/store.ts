@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS cards (
   rank         TEXT NOT NULL,
   completedAt  INTEGER,
   regressCount INTEGER NOT NULL DEFAULT 0,
+  rejectedBy     TEXT,
+  rejectedReason TEXT,
+  rejectedAt     INTEGER,
   updatedAt    INTEGER NOT NULL,
   deletedAt    INTEGER,
   dirty        INTEGER NOT NULL DEFAULT 0
@@ -203,7 +206,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_dirty    ON search_logs(dirty);
 `;
 
 /** 로컬 스토어 스키마 버전. 모양을 바꾸면 올리고 `migrate` 에 처리를 넣는다. */
-const STORE_VERSION = 3;
+const STORE_VERSION = 4;
 
 type Row = Record<string, unknown>;
 
@@ -270,6 +273,13 @@ export class Store {
       this.addColumnIfMissing("board_columns", "isDone", "INTEGER NOT NULL DEFAULT 0");
       this.addColumnIfMissing("cards", "completedAt", "INTEGER");
       this.addColumnIfMissing("cards", "regressCount", "INTEGER NOT NULL DEFAULT 0");
+    }
+    if (current < 4) {
+      // 기각 경로. 셋 다 NULL 허용이라 기존 카드는 "기각된 적 없음"이 된다 —
+      // 실제로 그렇기도 하고, 백필할 재료도 없다(누가 왜 튕겼는지는 소급 불가).
+      this.addColumnIfMissing("cards", "rejectedBy", "TEXT");
+      this.addColumnIfMissing("cards", "rejectedReason", "TEXT");
+      this.addColumnIfMissing("cards", "rejectedAt", "INTEGER");
     }
   }
 
@@ -429,12 +439,16 @@ export class Store {
   putCard(card: Card): void {
     this.db
       .prepare(
-        `INSERT INTO cards (id, repoId, columnId, title, body, rank, completedAt, regressCount, updatedAt, deletedAt, dirty)
-         VALUES (@id, @repoId, @columnId, @title, @body, @rank, @completedAt, @regressCount, @updatedAt, @deletedAt, 1)
+        `INSERT INTO cards (id, repoId, columnId, title, body, rank, completedAt, regressCount,
+                            rejectedBy, rejectedReason, rejectedAt, updatedAt, deletedAt, dirty)
+         VALUES (@id, @repoId, @columnId, @title, @body, @rank, @completedAt, @regressCount,
+                 @rejectedBy, @rejectedReason, @rejectedAt, @updatedAt, @deletedAt, 1)
          ON CONFLICT(id) DO UPDATE SET
            repoId = excluded.repoId, columnId = excluded.columnId, title = excluded.title,
            body = excluded.body, rank = excluded.rank, completedAt = excluded.completedAt,
-           regressCount = excluded.regressCount, updatedAt = excluded.updatedAt,
+           regressCount = excluded.regressCount, rejectedBy = excluded.rejectedBy,
+           rejectedReason = excluded.rejectedReason, rejectedAt = excluded.rejectedAt,
+           updatedAt = excluded.updatedAt,
            deletedAt = excluded.deletedAt, dirty = 1`,
       )
       .run(card);

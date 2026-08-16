@@ -1,13 +1,23 @@
 "use client";
 
 import { useEffect, useOptimistic, useRef, useState, useTransition } from "react";
-import type { Card, Column } from "@kybird/shared";
+import {
+  cardRejectionOwner,
+  LOOP_LABEL,
+  LOOP_SUBJECT,
+  REGRESS_STALL_THRESHOLD,
+  regressionReport,
+  type Card,
+  type CardRejectedBy,
+  type Column,
+} from "@kybird/shared";
 import {
   addCardAction,
   addColumnAction,
   deleteCardAction,
   editCardDetailsAction,
   moveCardAction,
+  rejectCardAction,
   renameColumnAction,
   restoreCardAction,
 } from "@/app/actions";
@@ -60,6 +70,11 @@ export function BoardClient({
 
   const openCard = optimistic.flatMap((c) => c.cards).find((c) => c.id === openCardId) ?? null;
 
+  // 회귀 계기판. optimistic 을 쓰는 이유는 방금 드래그로 되돌린 카드가 서버
+  // 왕복을 기다리지 않고 바로 반영되게 하기 위해서다 — 보드와 요약이 한
+  // 프레임이라도 다른 말을 하면 계기판을 못 믿게 된다.
+  const regression = regressionReport(optimistic.flatMap((c) => c.cards));
+
   function move(cardId: string, toColumnId: string, position: number) {
     startTransition(async () => {
       addOptimistic({ cardId, toColumnId, position });
@@ -99,6 +114,35 @@ export function BoardClient({
         >
           보관함 ({deletedCards.length}) {showTrash ? "숨기기" : "보기"}
         </button>
+      )}
+
+      {regression.stalled.length > 0 && (
+        <aside
+          role="status"
+          className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm dark:border-amber-900 dark:bg-amber-950/40"
+        >
+          <p className="font-medium text-amber-800 dark:text-amber-200">
+            {REGRESS_STALL_THRESHOLD}회 이상 회귀한 카드 {regression.stalled.length}개 — 수렴하지
+            않고 있다
+          </p>
+          <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
+            카드 정의(범위·완료 조건)나 접근을 다시 봐야 한다는 신호다. 보드 전체 회귀는 카드{" "}
+            {regression.regressed.length}개 / {regression.totalRegressions}회.
+          </p>
+          <ul className="mt-2 flex flex-col gap-1">
+            {regression.stalled.map((card) => (
+              <li key={card.id}>
+                <button
+                  type="button"
+                  onClick={() => setOpenCardId(card.id)}
+                  className="text-left text-amber-900 underline-offset-4 hover:underline dark:text-amber-100"
+                >
+                  ↺{card.regressCount} {card.title}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </aside>
       )}
 
       <div
@@ -319,8 +363,16 @@ function CardItem({
         <div className="flex shrink-0 items-center gap-1">
           {card.regressCount > 0 && (
             <span
-              title={`완료에서 ${card.regressCount}번 되돌아갔다 (회귀)`}
-              className="rounded bg-amber-100 px-1 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+              title={
+                card.regressCount >= REGRESS_STALL_THRESHOLD
+                  ? `완료에서 ${card.regressCount}번 되돌아갔다 — 수렴하지 않고 있다`
+                  : `완료에서 ${card.regressCount}번 되돌아갔다 (회귀)`
+              }
+              className={`rounded px-1 text-xs font-medium ${
+                card.regressCount >= REGRESS_STALL_THRESHOLD
+                  ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+                  : "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+              }`}
             >
               ↺{card.regressCount}
             </span>
@@ -328,6 +380,13 @@ function CardItem({
           <DeleteButton repoId={repoId} cardId={card.id} />
         </div>
       </div>
+      {card.rejectedBy !== null && card.rejectedReason !== null && (
+        // 기각 사유를 카드 앞면에 보여준다 — 모달을 열어야만 보이면 "왜
+        // 되돌아왔는지"를 아무도 안 읽고, 그러면 기각이 이동과 같아진다.
+        <span className="line-clamp-2 text-xs text-red-600 dark:text-red-400">
+          ⤺ {LOOP_LABEL[card.rejectedBy]} 기각: {card.rejectedReason}
+        </span>
+      )}
       {bodyPreview && (
         <span className="line-clamp-2 text-xs text-neutral-500 dark:text-neutral-400">
           {bodyPreview}
@@ -402,6 +461,9 @@ function CardModal({
 }) {
   const [title, setTitle] = useState(card.title);
   const [body, setBody] = useState(card.body);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectBy, setRejectBy] = useState<CardRejectedBy>("qa");
+  const [rejectReason, setRejectReason] = useState("");
   const [, startTransition] = useTransition();
 
   // 카드가 바뀌면(드래그 등으로) 입력값을 동기화한다.
@@ -416,6 +478,13 @@ function CardModal({
     const t = title.trim();
     if (!t) return;
     startTransition(() => editCardDetailsAction(repoId, cardId, t, body));
+  }
+
+  function reject() {
+    const reason = rejectReason.trim();
+    if (!reason) return;
+    onClose();
+    startTransition(() => rejectCardAction(repoId, cardId, rejectBy, reason));
   }
 
   return (
@@ -440,6 +509,70 @@ function CardModal({
           rows={12}
           className="w-full resize-none text-sm outline-none dark:bg-neutral-950"
         />
+        {card.rejectedBy !== null && card.rejectedReason !== null && (
+          <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm dark:border-red-900 dark:bg-red-950/40">
+            <p className="text-xs font-medium text-red-700 dark:text-red-300">
+              {LOOP_LABEL[card.rejectedBy]} 기각 →{" "}
+              {LOOP_SUBJECT[cardRejectionOwner(card.rejectedBy)]} 받는다
+              {card.rejectedAt !== null && ` · ${new Date(card.rejectedAt).toLocaleString()}`}
+            </p>
+            <p className="mt-1 whitespace-pre-wrap text-red-900 dark:text-red-100">
+              {card.rejectedReason}
+            </p>
+          </div>
+        )}
+
+        {rejecting ? (
+          <div className="flex flex-col gap-2 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+            <div className="flex gap-2 text-sm">
+              {(["qa", "dev"] as const).map((option) => (
+                <label key={option} className="flex items-center gap-1">
+                  <input
+                    type="radio"
+                    name="rejectBy"
+                    checked={rejectBy === option}
+                    onChange={() => setRejectBy(option)}
+                  />
+                  {LOOP_LABEL[option]} 기각 → {LOOP_LABEL[cardRejectionOwner(option)]}
+                </label>
+              ))}
+            </div>
+            <textarea
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              autoFocus
+              placeholder="왜 튕기는지 — 받는 쪽은 이것만 보고 고친다"
+              rows={3}
+              className="w-full resize-none rounded border border-neutral-200 p-2 text-sm outline-none dark:border-neutral-800 dark:bg-neutral-950"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRejecting(false)}
+                className="rounded-md px-3 py-1.5 text-sm text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={reject}
+                disabled={rejectReason.trim().length === 0}
+                className="rounded-md bg-red-600 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+              >
+                기각
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setRejecting(true)}
+            className="self-start text-sm text-red-600 underline-offset-4 hover:underline dark:text-red-400"
+          >
+            기각해서 되돌리기
+          </button>
+        )}
+
         {(card.completedAt !== null || card.regressCount > 0) && (
           <p className="text-xs text-neutral-400">
             {card.completedAt !== null && (

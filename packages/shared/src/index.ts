@@ -4,3 +4,4 @@ export * from "./auth.js";
 export * from "./rank.js";
 export * from "./ids.js";
 export * from "./repo-invite.js";
+export * from "./regression.js";

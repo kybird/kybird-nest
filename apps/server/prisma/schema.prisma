@@ -150,6 +150,18 @@ model Card {
   /// 끝냈던 일이 다시 열린 것이다.
   regressCount Int @default(0)
 
+  /// 마지막으로 이 카드를 기각한 루프("qa" | "dev"). 기각된 적이 없거나
+  /// 이후 다시 완료됐으면 null. 세 루프의 순환은 기각이 상류로 돌아가야
+  /// 닫힌다 — brief.md 0장 참고.
+  ///
+  /// 서버는 값을 해석하지 않고 그대로 들고만 있는다(brief.md 3장, 서버는
+  /// 저장소다). 그래서 enum 이 아니라 String 이다 — 루프가 늘어도 서버
+  /// 마이그레이션이 필요 없다.
+  rejectedBy     String?
+  /// 왜 튕겼는지. 이걸 읽고 상류가 고친다.
+  rejectedReason String?
+  rejectedAt     DateTime?
+
   updatedAt DateTime
   deletedAt DateTime?
   seq       Int
